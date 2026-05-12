@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>外汇风险与锁汇工作台</title>
+    <link rel="stylesheet" href="/web/styles.css?v=3" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>外汇风险与锁汇工作台</h1>
+        <p>录入敞口，查看锁汇建议，记录执行，回看到期收益。</p>
+      </div>
+      <div class="actions">
+        <button id="refreshRatesBtn" type="button">刷新汇率</button>
+        <button id="resetDemoBtn" type="button" class="secondary">恢复样例</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="statusBar" class="status-bar" role="status">
+        Ready
+      </section>
+
+      <section class="panel compact-panel">
+        <div class="panel-title">
+          <h2>汇率与缓存</h2>
+          <span id="rateStatus"></span>
+        </div>
+        <p class="notice">汇率来源：ExchangeRate-API open endpoint；本地按 24 小时缓存。</p>
+      </section>
+
+      <section class="grid two">
+        <form id="exposureForm" class="panel form-panel">
+          <h2>添加敞口</h2>
+          <label>到期日 <input name="due_date" type="date" required /></label>
+          <label>币种 <input name="currency" value="USD" maxlength="3" required /></label>
+          <label>方向
+            <select name="direction">
+              <option value="receipt">未来收外币</option>
+              <option value="payment">未来付外币</option>
+            </select>
+          </label>
+          <label>金额 <input name="amount" type="number" min="0" step="0.01" required /></label>
+          <label>概率 <input name="probability" type="number" min="0" max="1" step="0.01" value="1" /></label>
+          <label>风险类型
+            <select name="category">
+              <option value="balance_sheet">资产负债表套保</option>
+              <option value="cash_flow">现金流套保</option>
+              <option value="order_contract">合同/订单套保</option>
+            </select>
+          </label>
+          <label>备注 <input name="description" placeholder="例如：6月出口订单" /></label>
+          <button type="submit">保存敞口</button>
+        </form>
+
+        <form id="hedgeForm" class="panel form-panel">
+          <h2>执行锁汇</h2>
+          <label>交易日 <input name="trade_date" type="date" required /></label>
+          <label>到期日 <input name="due_date" type="date" required /></label>
+          <label>币种 <input name="currency" value="USD" maxlength="3" required /></label>
+          <label>操作
+            <select name="action">
+              <option value="sell_foreign">卖出外币/远期结汇</option>
+              <option value="buy_foreign">买入外币/远期购汇</option>
+            </select>
+          </label>
+          <label>锁汇金额 <input name="amount" type="number" min="0" step="0.01" required /></label>
+          <label>锁定汇率 <input name="locked_rate" type="number" min="0" step="0.000001" required /></label>
+          <label>备注 <input name="description" placeholder="例如：银行远期结汇" /></label>
+          <button type="submit">记录锁汇</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>锁汇建议</h2>
+          <p>系统按“剩余敞口 × 当前汇率”估算风险，超过阈值默认建议锁 100%，否则建议先锁 50%。</p>
+        </div>
+        <div id="suggestions" class="cards"></div>
+      </section>
+
+      <section class="panel">
+        <h2>净敞口</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>期间</th>
+                <th>币种</th>
+                <th>风险类型</th>
+                <th>目标套保比例</th>
+                <th>业务敞口</th>
+                <th>已锁敞口</th>
+                <th>剩余敞口</th>
+                <th>当前汇率</th>
+                <th>人民币风险</th>
+              </tr>
+            </thead>
+            <tbody id="netExposureRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="grid two">
+        <section id="exposureListPanel" class="panel">
+          <h2>敞口明细</h2>
+          <div id="exposureRows" class="list"></div>
+        </section>
+        <section class="panel">
+          <h2>锁汇明细</h2>
+          <div id="hedgeRows" class="list"></div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>预计损益场景</h2>
+        <div id="scenarioRows" class="list"></div>
+      </section>
+
+      <section class="grid two">
+        <form id="settlementForm" class="panel form-panel">
+          <h2>添加到期实际汇率</h2>
+          <label>到期日 <input name="due_date" type="date" required /></label>
+          <label>币种 <input name="currency" value="USD" maxlength="3" required /></label>
+          <label>实际汇率 <input name="actual_rate" type="number" min="0" step="0.000001" required /></label>
+          <label>备注 <input name="description" placeholder="例如：到期结算汇率" /></label>
+          <button type="submit">保存实际汇率</button>
+        </form>
+        <section class="panel">
+          <h2>回测结果</h2>
+          <div id="backtestRows" class="list"></div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>配置</h2>
+        <form id="configForm" class="config-form">
+          <label>汇率接口 <input name="rate_api_url" /></label>
+          <label>缓存小时 <input name="rate_cache_hours" type="number" min="1" step="1" /></label>
+          <label>风险阈值 CNY <input name="risk_limit_cny" type="number" min="0" step="1000" /></label>
+          <label>企业类型
+            <select name="enterprise_type">
+              <option value="comprehensive">综合型</option>
+              <option value="export">出口型</option>
+              <option value="import">进口型</option>
+            </select>
+          </label>
+          <label>默认套保比例 <input name="default_hedge_ratio" type="number" min="0" max="1" step="0.05" /></label>
+          <label>乐观场景涨跌幅 <input name="optimistic_shift_pct" type="number" step="0.01" /></label>
+          <label>悲观场景涨跌幅 <input name="pessimistic_shift_pct" type="number" step="0.01" /></label>
+          <label>自定义场景涨跌幅 <input name="custom_scenario_shift_pct" type="number" step="0.01" /></label>
+          <button type="submit">保存配置</button>
+        </form>
+      </section>
+    </main>
+
+    <script src="/web/app.js?v=3"></script>
+  </body>
+</html>

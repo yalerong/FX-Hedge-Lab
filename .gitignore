@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+data/tmp/
+data/fx_workspace.json
+data/rates_cache.json

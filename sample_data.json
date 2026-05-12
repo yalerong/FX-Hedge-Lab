@@ -1,0 +1,137 @@
+{
+  "materiality_foreign": 1000,
+  "validation": {
+    "pnl_tolerance_cny": 500
+  },
+  "opening_exposures": [
+    {
+      "id": "open-usd-2026-06",
+      "period": "2026-06",
+      "currency": "USD",
+      "amount": 800000,
+      "purpose": "balance_sheet"
+    }
+  ],
+  "forecast_changes": [
+    {
+      "id": "fc-1",
+      "period": "2026-06",
+      "currency": "USD",
+      "direction": "receipt",
+      "amount": 1200000,
+      "purpose": "cash_flow"
+    },
+    {
+      "id": "fc-2",
+      "period": "2026-06",
+      "currency": "EUR",
+      "direction": "payment",
+      "amount": 250000,
+      "purpose": "cash_flow"
+    }
+  ],
+  "balance_sheet_items": [
+    {
+      "id": "bs-usd-cash",
+      "period": "2026-06",
+      "currency": "USD",
+      "side": "asset",
+      "amount": 300000,
+      "account_code": "1002"
+    },
+    {
+      "id": "bs-usd-ap",
+      "period": "2026-06",
+      "currency": "USD",
+      "side": "liability",
+      "amount": 150000,
+      "account_code": "2202"
+    }
+  ],
+  "business_docs": [
+    {
+      "id": "order-1001",
+      "doc_type": "order",
+      "settlement_period": "2026-06",
+      "currency": "USD",
+      "direction": "export",
+      "amount": 500000,
+      "probability": 0.7,
+      "bad_debt_rate": 0.02,
+      "purpose": "order_contract"
+    },
+    {
+      "id": "contract-2001",
+      "doc_type": "contract",
+      "settlement_period": "2026-06",
+      "currency": "EUR",
+      "direction": "import",
+      "amount": 100000,
+      "probability": 1.0,
+      "bad_debt_rate": 0,
+      "purpose": "order_contract"
+    }
+  ],
+  "executed_trades": [
+    {
+      "id": "fwd-usd-1",
+      "product_type": "forward",
+      "purpose": "cash_flow",
+      "delivery_period": "2026-06",
+      "sell_currency": "USD",
+      "sell_amount": 700000,
+      "buy_currency": "CNY",
+      "buy_amount": 5026000,
+      "rate": 7.18
+    }
+  ],
+  "industry_factors": [
+    {
+      "id": "price-elasticity",
+      "period": "2026-06",
+      "value": 0.6,
+      "weight": 30
+    }
+  ],
+  "rates": {
+    "base": {
+      "USD/CNY": 7.15,
+      "EUR/CNY": 7.72
+    },
+    "actual": {
+      "USD/CNY": 7.21,
+      "EUR/CNY": 7.65
+    },
+    "scenarios": {
+      "base": {
+        "USD/CNY": 7.15,
+        "EUR/CNY": 7.72
+      },
+      "foreign_up": {
+        "USD/CNY": 7.35,
+        "EUR/CNY": 7.95
+      },
+      "foreign_down": {
+        "USD/CNY": 6.95,
+        "EUR/CNY": 7.50
+      },
+      "stress": {
+        "USD/CNY": 6.75,
+        "EUR/CNY": 8.10
+      }
+    }
+  },
+  "forward_rates": {
+    "2026-06": {
+      "USD/CNY": 7.18,
+      "EUR/CNY": 7.78
+    }
+  },
+  "accounting_checks": [
+    {
+      "period": "2026-06",
+      "currency": "USD",
+      "reported_pnl_cny": 90000
+    }
+  ]
+}
