@@ -38,6 +38,51 @@ class WebAppLogicTest(unittest.TestCase):
         backtest_usd = next(row for row in dashboard["backtest"] if row["currency"] == "USD")
         self.assertEqual(backtest_usd["hedge_effect_cny"], -15000)
 
+    def test_sample_state_keeps_future_actions_and_settled_history(self):
+        today = date(2026, 9, 23)
+        state = web_app.sample_state(today=today)
+        dashboard = web_app.build_dashboard(state, self.rates, forecast_doc={}, today=today)
+
+        self.assertTrue(any(row["due_date"] > today.isoformat() for row in state["exposures"]))
+        self.assertTrue(dashboard["suggestions"])
+        self.assertTrue(all(not row["past_due"] for row in dashboard["suggestions"]))
+        self.assertTrue(any(row["settled"] for row in dashboard["backtest"]))
+
+    def test_fallback_rates_show_exposure_but_block_advice(self):
+        dashboard = web_app.build_dashboard(
+            web_app.DEMO_STATE,
+            {
+                "source": "built-in fallback rates",
+                "status": "fallback",
+                "fetched_at": "2026-05-12T00:00:00Z",
+                "pair_rates": {"USD": 7.2, "EUR": 7.8},
+            },
+            forecast_doc={},
+        )
+
+        self.assertFalse(dashboard["rates_actionable"])
+        self.assertEqual(dashboard["suggestions"], [])
+        self.assertTrue(dashboard["net_exposures"])
+        self.assertTrue(dashboard["rate_trial_reasons"])
+
+    def test_cached_after_refresh_error_is_trial_only(self):
+        dashboard = web_app.build_dashboard(
+            web_app.DEMO_STATE,
+            {
+                "source": "ExchangeRate-API open endpoint",
+                "status": "cached_after_refresh_error",
+                "last_error": "timeout",
+                "fetched_at": "2026-05-12T00:00:00Z",
+                "pair_rates": {"USD": 7.2, "EUR": 7.8},
+            },
+            forecast_doc={},
+        )
+
+        self.assertFalse(dashboard["rates_actionable"])
+        self.assertTrue(dashboard["suggestions"])
+        self.assertTrue(all(row["trial"] for row in dashboard["suggestions"]))
+        self.assertTrue(any("timeout" in reason for row in dashboard["suggestions"] for reason in row["trial_reasons"]))
+
     def test_scenario_rows_cover_exposures_without_recommendation(self):
         # 已锁量超过目标覆盖量时不会再产生建议，但剩余敞口的浮动损益必须照样出现。
         state = copy.deepcopy(web_app.DEMO_STATE)
@@ -247,7 +292,7 @@ class WebAppLogicTest(unittest.TestCase):
 
         self.assertTrue(dashboard["suggestions"])
         self.assertTrue(all(row["trial"] for row in dashboard["suggestions"]))
-        self.assertTrue(any("confirm" in reason for row in dashboard["suggestions"]
+        self.assertTrue(any("执行前请核对当前即期汇率" in reason for row in dashboard["suggestions"]
                             for reason in row["trial_reasons"]))
 
     def test_neutral_scenario_is_not_zero_once_there_are_forward_points(self):

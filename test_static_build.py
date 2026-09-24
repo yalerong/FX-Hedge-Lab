@@ -90,8 +90,27 @@ class StaticBuildTest(unittest.TestCase):
 
         self.assertIn("${escapeHtml(row.trade_rate)}", source_js)
         self.assertNotIn("${row.trade_rate}", source_js)
+        self.assertIn('notes.map(escapeHtml).join("；")', source_js)
+        self.assertNotIn('${notes.join("；")}', source_js)
         self.assertIn('<button type="button" disabled>按建议填入锁汇单</button>', source_js)
         self.assertIn("if (!item.past_due)", source_js)
+
+    def test_productized_workflow_exposes_user_actions_without_new_dependencies(self):
+        source_html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        source_css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertLess(source_html.index('id="todo"'), source_html.index('id="cockpit"'))
+        self.assertIn("primary-file-action", source_html)
+        self.assertEqual(source_html.count('id="importXlsxFile"'), 1)
+        self.assertIn('id="advancedConfig"', source_html)
+        self.assertLess(source_html.index('id="dataManagement"'), source_html.index('id="resetDemoBtn"'))
+        self.assertIn("TRADINGVIEW_CNY_CURRENCIES", source_js)
+        self.assertIn("www.tradingview.com/symbols/", source_js)
+        self.assertIn('rel="noopener noreferrer"', source_js)
+        self.assertIn("行情为参考价，真正可执行价格以银行远期报价为准", source_js)
+        self.assertIn("window.print()", source_js)
+        self.assertIn("data-print-plan", source_css)
 
     def test_config_form_exposes_provisional_confirmation_flags(self):
         self.assertIn('name="confirmed_parameters"', self.html)

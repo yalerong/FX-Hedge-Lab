@@ -209,6 +209,18 @@ main {
   grid-column: 1 / -1;
 }
 
+.import-panel {
+  grid-column: 1 / -1;
+  border-left: 3px solid var(--accent);
+}
+
+.primary-file-action {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
 label {
   display: grid;
   gap: 5px;
@@ -450,6 +462,18 @@ th {
   font-size: 12px;
   color: var(--muted);
   margin: 0;
+}
+
+.trend-link {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+}
+
+.trend-link a {
+  color: var(--accent-dark);
+  font-weight: 700;
 }
 
 @media (max-width: 860px) {
@@ -752,6 +776,13 @@ th {
   flex: 1 1 260px;
 }
 
+.plan-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .checkbox-label {
   display: flex;
   align-items: center;
@@ -794,4 +825,65 @@ th {
 
 .file-action input {
   display: none;
+}
+
+.advanced-settings {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+.advanced-settings summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .advanced-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media print {
+  body[data-print-plan] .topbar,
+  body[data-print-plan] .sidenav,
+  body[data-print-plan] #statusBar,
+  body[data-print-plan] main > section:not(#plans),
+  body[data-print-plan] #plans > .panel-title,
+  body[data-print-plan] #plans > .notice,
+  body[data-print-plan] #planRows > .item,
+  body[data-print-plan] .plan-row-actions {
+    display: none !important;
+  }
+
+  body[data-print-plan],
+  body[data-print-plan] .layout,
+  body[data-print-plan] main,
+  body[data-print-plan] #plans,
+  body[data-print-plan] #planRows > .item.print-target {
+    display: block !important;
+    max-width: none;
+    padding: 0;
+    margin: 0;
+    background: #ffffff;
+    color: #000000;
+  }
+
+  body[data-print-plan] #planRows > .item.print-target {
+    border: 0;
+  }
+
+  body[data-print-plan] .table-wrap {
+    overflow: visible;
+    background: none;
+  }
 }

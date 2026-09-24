@@ -11,6 +11,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,7 @@ def normalize(reason: str | None) -> str:
 def main() -> int:
     # Python 侧的 move 是 abs(forecast[-1]/current - 1) 反推出来的，用 current=1.0
     # 让两侧拿到位级相同的浮点数，否则 move == mape 的边界会因舍入而假报不一致。
+    generated_at = date.today().isoformat() + "T00:00:00Z"
     cases = []
     for tier in TIERS:
         for direction in DIRECTIONS:
@@ -54,7 +56,8 @@ def main() -> int:
                 for move in MOVES:
                     eff = abs((1.0 + move) / 1.0 - 1.0)
                     cases.append(
-                        {"tier": tier, "direction": direction, "move": eff, "mape": 0.018, "net": net}
+                        {"tier": tier, "direction": direction, "move": eff, "mape": 0.018,
+                         "net": net, "generated_at": generated_at}
                     )
 
     script = (
@@ -62,7 +65,7 @@ def main() -> int:
         + "\nconst cases = "
         + json.dumps(cases)
         + ";\nconst out = cases.map(c => {"
-        + "  const signal = c.tier === null ? null : {tier: c.tier, direction: c.direction, move: c.move, mape: c.mape};"
+        + "  const signal = c.tier === null ? null : {tier: c.tier, direction: c.direction, move: c.move, mape: c.mape, generated_at: c.generated_at};"
         + "  const r = forecastMultiplier(signal, c.net);"
         + "  return [r[0], r[1]];"
         + "});\nconsole.log(JSON.stringify(out));\n"
@@ -83,6 +86,7 @@ def main() -> int:
                 "tier": case["tier"],
                 "direction": case["direction"],
                 "mape": case["mape"],
+                "generated_at": case["generated_at"],
                 "current": 1.0,
                 "forecast": [{"rate": 1.0 + case["move"]}],
             }

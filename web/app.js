@@ -12,6 +12,7 @@ const CONFIG_PERCENT_FIELDS = new Set([
   "pessimistic_shift_pct",
   "custom_scenario_shift_pct",
 ]);
+const TRADINGVIEW_CNY_CURRENCIES = new Set(["USD", "EUR", "JPY", "HKD", "GBP", "AUD", "SGD", "CAD", "CHF", "NZD"]);
 
 function showStatus(message, type = "ok") {
   const box = document.getElementById("statusBar");
@@ -300,6 +301,23 @@ function renderRateStatus(data) {
     `汇率：${rateStatusText(rates.status)} · 更新于 ${fmtTime(rates.fetched_at)}`;
 }
 
+function tradingViewTrendUrl(currency) {
+  const code = String(currency || "").trim().toUpperCase();
+  if (!TRADINGVIEW_CNY_CURRENCIES.has(code)) return "";
+  return `https://www.tradingview.com/symbols/${encodeURIComponent(`${code}CNY`)}/`;
+}
+
+function trendLink(item) {
+  const href = tradingViewTrendUrl(item.currency);
+  if (!href) return "";
+  return `
+    <p class="meta trend-link">
+      <a href="${href}" target="_blank" rel="noopener noreferrer">查看汇率走势</a>
+      <span>行情为参考价，真正可执行价格以银行远期报价为准。</span>
+    </p>
+  `;
+}
+
 function renderSuggestions(items) {
   const box = document.getElementById("suggestions");
   box.innerHTML = "";
@@ -321,6 +339,7 @@ function renderSuggestions(items) {
       <p class="meta">剩余敞口：${money(item.net_exposure)}，目标套保比例：${ratioLine}，损益科目：${bucketName(item.accounting_bucket)}</p>
       <p class="meta">建议金额：${money(item.recommended_amount)}，交易汇率：${item.trade_rate}${forwardTag(item)}，人民币风险：${money(item.risk_cny)}</p>
       ${forwardLine(item)}
+      ${trendLink(item)}
       ${item.past_due
         ? '<p class="notice notice-warn">到期日已过，按今天的交易日已经下不了这张远期单：请到「结算明细」登记实际结果，或把敞口的到期日改到未来。</p><button type="button" disabled>按建议填入锁汇单</button>'
         : '<button type="button">按建议填入锁汇单</button>'}
@@ -381,7 +400,7 @@ function renderForecastBlock(item) {
   const notes = [];
   if (item.forecast_reason) notes.push(item.forecast_reason);
   if (s.tier_reasons && s.tier_reasons.length) notes.push(...s.tier_reasons);
-  const reason = notes.length ? `<p class="meta forecast-reason">${notes.join("；")}</p>` : "";
+  const reason = notes.length ? `<p class="meta forecast-reason">${notes.map(escapeHtml).join("；")}</p>` : "";
   return `
     <div class="forecast-block">
       <div class="forecast-chips">${chips.join("")}</div>
@@ -1032,6 +1051,7 @@ function renderPlans(rows) {
   rows.forEach((plan) => {
     const div = document.createElement("div");
     div.className = "item";
+    div.dataset.planId = plan.id || "";
     const lines = (plan.rows || []).map((row) => `
       <tr>
         <td>${escapeHtml(row.period)} ${escapeHtml(row.currency)}</td>
@@ -1046,15 +1066,20 @@ function renderPlans(rows) {
       <p class="meta">冻结于 ${escapeHtml(fmtTime(plan.created_at))}，
         默认套保比例 ${ratioText((plan.config || {}).default_hedge_ratio)}，
         汇率取自 ${escapeHtml((plan.rate_snapshot || {}).status || "-")}</p>
+      <p class="notice plan-print-note">方案为冻结快照，行情与参数仅用于当时建议复盘；交易执行仍以银行远期报价、内部授权和实际成交为准。</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>期间/币种</th><th>目标比例</th><th>折扣</th><th>建议金额</th><th>交易汇率</th></tr></thead>
           <tbody>${lines}</tbody>
         </table>
       </div>
-      <button type="button" class="secondary">删除这份方案</button>
+      <div class="plan-row-actions">
+        <button type="button" class="secondary plan-print-btn">打印/导出 PDF</button>
+        <button type="button" class="secondary plan-delete-btn">删除这份方案</button>
+      </div>
     `;
-    div.querySelector("button").addEventListener("click", async () => {
+    div.querySelector(".plan-print-btn").addEventListener("click", () => printPlan(plan.id));
+    div.querySelector(".plan-delete-btn").addEventListener("click", async () => {
       if (!window.confirm(`确认删除方案「${plan.label}」？此操作无法撤销。`)) return;
       await runAction("正在删除...", async () => {
         await api(`/api/plans/${plan.id}`, { method: "DELETE" });
@@ -1064,6 +1089,21 @@ function renderPlans(rows) {
     });
     box.appendChild(div);
   });
+}
+
+function printPlan(planId) {
+  document.querySelectorAll("#planRows .item").forEach((item) => {
+    item.classList.toggle("print-target", item.dataset.planId === String(planId || ""));
+  });
+  document.body.dataset.printPlan = String(planId || "");
+  const clear = () => {
+    delete document.body.dataset.printPlan;
+    document.querySelectorAll("#planRows .item").forEach((item) => item.classList.remove("print-target"));
+    window.removeEventListener("afterprint", clear);
+  };
+  window.addEventListener("afterprint", clear);
+  window.print();
+  window.setTimeout(clear, 60000);
 }
 
 function renderConfig(config) {

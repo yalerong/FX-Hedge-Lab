@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import tempfile
 import threading
@@ -188,6 +189,23 @@ class HttpApiTest(unittest.TestCase):
                 self.fail(f"应该 400，实际 {response.status}")
         except urllib.error.HTTPError as exc:
             self.assertEqual(exc.code, 400)
+
+    def test_oversized_request_is_rejected_before_reading_the_body(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_address[1], timeout=10,
+        )
+        try:
+            connection.putrequest("POST", "/api/exposures")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(web_app.MAX_REQUEST_BODY_BYTES + 1))
+            connection.endheaders()
+            response = connection.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("5 MB", body["error"])
 
     def test_config_update_is_merged_not_replaced(self):
         status, payload = request("POST", f"{self.base}/api/config", {"default_hedge_ratio": 0.6})
