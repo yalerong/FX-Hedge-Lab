@@ -12,6 +12,11 @@ const CONFIG_PERCENT_FIELDS = new Set([
   "pessimistic_shift_pct",
   "custom_scenario_shift_pct",
 ]);
+const TRADINGVIEW_CNY_CURRENCIES = new Set(["USD", "EUR", "JPY", "HKD", "GBP", "AUD", "SGD", "CAD", "CHF", "NZD"]);
+const HEDGE_ACTION_LABELS = {
+  sell_foreign: "卖出外币/远期结汇",
+  buy_foreign: "买入外币/远期购汇",
+};
 
 function showStatus(message, type = "ok") {
   const box = document.getElementById("statusBar");
@@ -21,6 +26,10 @@ function showStatus(message, type = "ok") {
 
 function money(value) {
   return fmt.format(Number(value || 0));
+}
+
+function hedgeActionLabel(action) {
+  return HEDGE_ACTION_LABELS[action] || action || "—";
 }
 
 function localToday() {
@@ -153,12 +162,17 @@ function renderDashboard(data) {
   renderWorkspace(data.workspace || {});
   renderRateStatus(data);
   renderPortfolio(data.portfolio || {});
-  renderSuggestions(data.suggestions || []);
+  renderSuggestions(data.suggestions || [], data.rate_trial_reasons || []);
   renderNetExposure(data.net_exposures || []);
   renderExposureTable(data.exposures || []);
   renderHedgeTable(data.hedges || []);
   renderSettlementTable(data.settlements || []);
-  renderScenarioRows(data.scenario_rows || [], data.scenario_totals || {}, data.scenario_uniform);
+  renderScenarioRows(
+    data.scenario_rows || [],
+    data.scenario_totals || {},
+    data.scenario_uniform,
+    data.rate_trial_reasons || [],
+  );
   renderList("backtestRows", data.backtest || [], renderBacktest);
   renderPlanDrift(data.plan_drift || {});
   renderPlans(data.plans || []);
@@ -300,11 +314,31 @@ function renderRateStatus(data) {
     `汇率：${rateStatusText(rates.status)} · 更新于 ${fmtTime(rates.fetched_at)}`;
 }
 
-function renderSuggestions(items) {
+function tradingViewTrendUrl(currency) {
+  const code = String(currency || "").trim().toUpperCase();
+  if (!TRADINGVIEW_CNY_CURRENCIES.has(code)) return "";
+  return `https://www.tradingview.com/symbols/${encodeURIComponent(`${code}CNY`)}/`;
+}
+
+function trendLink(item) {
+  const href = tradingViewTrendUrl(item.currency);
+  if (!href) return "";
+  return `
+    <p class="meta trend-link">
+      <a href="${href}" target="_blank" rel="noopener noreferrer">查看汇率走势</a>
+      <span>行情为参考价，真正可执行价格以银行远期报价为准。</span>
+    </p>
+  `;
+}
+
+function renderSuggestions(items, rateTrialReasons = []) {
   const box = document.getElementById("suggestions");
   box.innerHTML = "";
   if (!items.length) {
-    box.innerHTML = '<div class="card">暂无建议。先添加敞口。</div>';
+    const reason = rateTrialReasons.length
+      ? `暂无可执行建议：${rateTrialReasons.map(escapeHtml).join("；")}。请先刷新实时汇率。`
+      : "暂无建议。先添加敞口。";
+    box.innerHTML = `<div class="card">${reason}</div>`;
     return;
   }
   items.forEach((item) => {
@@ -321,6 +355,7 @@ function renderSuggestions(items) {
       <p class="meta">剩余敞口：${money(item.net_exposure)}，目标套保比例：${ratioLine}，损益科目：${bucketName(item.accounting_bucket)}</p>
       <p class="meta">建议金额：${money(item.recommended_amount)}，交易汇率：${item.trade_rate}${forwardTag(item)}，人民币风险：${money(item.risk_cny)}</p>
       ${forwardLine(item)}
+      ${trendLink(item)}
       ${item.past_due
         ? '<p class="notice notice-warn">到期日已过，按今天的交易日已经下不了这张远期单：请到「结算明细」登记实际结果，或把敞口的到期日改到未来。</p><button type="button" disabled>按建议填入锁汇单</button>'
         : '<button type="button">按建议填入锁汇单</button>'}
@@ -361,7 +396,7 @@ function renderForecastBlock(item) {
   const s = item.forecast_signal;
   if (!s) return "";
   const tier = s.tier || "reject";
-  const dir = s.direction || "flat";
+  const dir = item.forecast_direction || s.direction || "flat";
   const chips = [];
   chips.push(`<span class="chip dir-${dir}">${dirText(dir)}</span>`);
   if (s.mape !== null && s.mape !== undefined) {
@@ -381,7 +416,7 @@ function renderForecastBlock(item) {
   const notes = [];
   if (item.forecast_reason) notes.push(item.forecast_reason);
   if (s.tier_reasons && s.tier_reasons.length) notes.push(...s.tier_reasons);
-  const reason = notes.length ? `<p class="meta forecast-reason">${notes.join("；")}</p>` : "";
+  const reason = notes.length ? `<p class="meta forecast-reason">${notes.map(escapeHtml).join("；")}</p>` : "";
   return `
     <div class="forecast-block">
       <div class="forecast-chips">${chips.join("")}</div>
@@ -496,11 +531,14 @@ function renderScenarioTotals(totals, legCount) {
   `;
 }
 
-function renderScenarioRows(entries, totals, uniform) {
+function renderScenarioRows(entries, totals, uniform, rateTrialReasons = []) {
   const box = document.getElementById("scenarioRows");
   box.innerHTML = "";
   if (!entries.length) {
-    box.innerHTML = '<div class="item">暂无敞口，因此没有预计损益场景。</div>';
+    const reason = rateTrialReasons.length
+      ? `暂无可执行情景测算：${rateTrialReasons.map(escapeHtml).join("；")}。请先刷新实时汇率。`
+      : "暂无敞口，因此没有预计损益场景。";
+    box.innerHTML = `<div class="item">${reason}</div>`;
     return;
   }
   // 先给组合层面的总账，再给逐个期间/币种的明细。
@@ -789,9 +827,7 @@ function renderHedgeTable(rows) {
     { render: (row) => escapeHtml(row.due_date) },
     { render: (row) => escapeHtml(row.currency) },
     {
-      render: (row) => row.action === "sell_foreign"
-        ? "卖出外币/远期结汇"
-        : "买入外币/远期购汇",
+      render: (row) => escapeHtml(hedgeActionLabel(row.action)),
     },
     { render: (row) => money(row.amount), cls: "num" },
     { render: (row) => escapeHtml(row.locked_rate), cls: "num" },
@@ -985,7 +1021,9 @@ function renderPlanDrift(drift) {
   const parts = [];
   const decision = Object.entries(drift.decision_changed || {});
   const scenario = Object.entries(drift.scenario_changed || {});
+  const recommendation = Object.entries(drift.recommendation_changed || {});
   const rates = Object.entries(drift.rate_moved || {});
+  const isStale = Boolean(drift.stale) || Boolean(recommendation.length);
 
   if (decision.length) {
     parts.push(`<p><b>影响建议金额的参数已改：</b>${decision.map(([key, change]) =>
@@ -995,6 +1033,23 @@ function renderPlanDrift(drift) {
   if (scenario.length) {
     parts.push(`<p class="meta">只影响损益模拟、不影响建议金额的改动：${scenario.map(([key]) =>
       escapeHtml(DECISION_LABELS[key] || key)).join("、")}</p>`);
+  }
+  if (recommendation.length) {
+    const labels = {
+      status: "建议状态",
+      action: "操作方向",
+      forecast_multiplier: "预测折扣",
+      effective_hedge_ratio: "有效套保比例",
+      recommended_amount: "建议金额",
+    };
+    parts.push(`<p><b>冻结方案里的建议已变：</b>${recommendation.map(([rowKey, changes]) => {
+      const fields = Object.entries(changes || {}).map(([field, change]) => {
+        const from = field === "action" ? hedgeActionLabel(change.from) : auditValue(change.from);
+        const to = field === "action" ? hedgeActionLabel(change.to) : auditValue(change.to);
+        return `${escapeHtml(labels[field] || field)} ${escapeHtml(from)} → ${escapeHtml(to)}`;
+      });
+      return `${escapeHtml(rowKey)}：${fields.join("、")}`;
+    }).join("；")}</p>`);
   }
   const signals = Object.entries(drift.signal_changed || {});
   if (signals.length) {
@@ -1011,8 +1066,8 @@ function renderPlanDrift(drift) {
     return;
   }
   box.innerHTML = `
-    <div class="item ${drift.stale ? "warn-item" : ""}">
-      <strong>${drift.stale ? "当前建议已经不是方案里的那份" : "方案与当前建议一致"}</strong>
+    <div class="item ${isStale ? "warn-item" : ""}">
+      <strong>${isStale ? "当前建议已经不是方案里的那份" : "方案与当前建议一致"}</strong>
       <p class="meta">对比对象：「${escapeHtml(drift.label || "-")}」，冻结于 ${escapeHtml(fmtTime(drift.created_at))}</p>
       ${parts.join("")}
     </div>
@@ -1032,9 +1087,11 @@ function renderPlans(rows) {
   rows.forEach((plan) => {
     const div = document.createElement("div");
     div.className = "item";
+    div.dataset.planId = plan.id || "";
     const lines = (plan.rows || []).map((row) => `
       <tr>
         <td>${escapeHtml(row.period)} ${escapeHtml(row.currency)}</td>
+        <td>${escapeHtml(hedgeActionLabel(row.action))}</td>
         <td class="num">${ratioText(row.target_hedge_ratio)}</td>
         <td class="num">${Number(row.forecast_multiplier).toFixed(2)}×</td>
         <td class="num">${money(row.recommended_amount)}</td>
@@ -1046,15 +1103,20 @@ function renderPlans(rows) {
       <p class="meta">冻结于 ${escapeHtml(fmtTime(plan.created_at))}，
         默认套保比例 ${ratioText((plan.config || {}).default_hedge_ratio)}，
         汇率取自 ${escapeHtml((plan.rate_snapshot || {}).status || "-")}</p>
+      <p class="notice plan-print-note">方案为冻结快照，行情与参数仅用于当时建议复盘；交易执行仍以银行远期报价、内部授权和实际成交为准。</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>期间/币种</th><th>目标比例</th><th>折扣</th><th>建议金额</th><th>交易汇率</th></tr></thead>
+          <thead><tr><th>期间/币种</th><th>建议动作</th><th>目标比例</th><th>折扣</th><th>建议金额</th><th>交易汇率</th></tr></thead>
           <tbody>${lines}</tbody>
         </table>
       </div>
-      <button type="button" class="secondary">删除这份方案</button>
+      <div class="plan-row-actions">
+        <button type="button" class="secondary plan-print-btn">打印/导出 PDF</button>
+        <button type="button" class="secondary plan-delete-btn">删除这份方案</button>
+      </div>
     `;
-    div.querySelector("button").addEventListener("click", async () => {
+    div.querySelector(".plan-print-btn").addEventListener("click", () => printPlan(plan.id));
+    div.querySelector(".plan-delete-btn").addEventListener("click", async () => {
       if (!window.confirm(`确认删除方案「${plan.label}」？此操作无法撤销。`)) return;
       await runAction("正在删除...", async () => {
         await api(`/api/plans/${plan.id}`, { method: "DELETE" });
@@ -1064,6 +1126,21 @@ function renderPlans(rows) {
     });
     box.appendChild(div);
   });
+}
+
+function printPlan(planId) {
+  document.querySelectorAll("#planRows .item").forEach((item) => {
+    item.classList.toggle("print-target", item.dataset.planId === String(planId || ""));
+  });
+  document.body.dataset.printPlan = String(planId || "");
+  const clear = () => {
+    delete document.body.dataset.printPlan;
+    document.querySelectorAll("#planRows .item").forEach((item) => item.classList.remove("print-target"));
+    window.removeEventListener("afterprint", clear);
+  };
+  window.addEventListener("afterprint", clear);
+  window.print();
+  window.setTimeout(clear, 60000);
 }
 
 function renderConfig(config) {
@@ -1137,7 +1214,10 @@ function bindSetupPanel() {
   });
   if (sample) sample.addEventListener("click", async () => {
     await runAction("正在加载样例...", async () => {
-      await api("/api/workspace/sample", { method: "POST", body: "{}" });
+      await api("/api/workspace/sample", {
+        method: "POST",
+        body: JSON.stringify({ today: today() }),
+      });
       afterWorkspaceReplaced();
       await loadDashboard();
       showStatus("样例数据已加载。");
@@ -1161,6 +1241,7 @@ function bindDataManagement() {
   if (importCsvFile) importCsvFile.addEventListener("change", importCsv);
   if (exportXlsxBtn) exportXlsxBtn.addEventListener("click", exportXlsx);
   if (importXlsxFile) importXlsxFile.addEventListener("change", importXlsx);
+  bindCsvCollectionSelectors();
   if (restoreBtn) restoreBtn.addEventListener("click", restoreLatestBackup);
   if (clearBtn) clearBtn.addEventListener("click", clearBusinessData);
   if (undoBtn) {
@@ -1169,8 +1250,19 @@ function bindDataManagement() {
   }
 }
 
+function bindCsvCollectionSelectors() {
+  const selects = Array.from(document.querySelectorAll("[data-csv-collection-select]"));
+  selects.forEach((select) => {
+    select.addEventListener("change", () => {
+      selects.forEach((other) => {
+        if (other !== select) other.value = select.value;
+      });
+    });
+  });
+}
+
 function selectedCsvCollection() {
-  const select = document.getElementById("csvCollectionSelect");
+  const select = document.querySelector("[data-csv-collection-select]");
   return select ? select.value : "exposures";
 }
 
@@ -1388,7 +1480,10 @@ function bindForms() {
   document.getElementById("resetDemoBtn").addEventListener("click", async () => {
     if (!window.confirm("恢复样例会覆盖当前敞口、锁汇、结算记录和配置参数；系统会先自动备份当前工作区。确认继续？")) return;
     await runAction("正在恢复样例...", async () => {
-      await api("/api/reset-demo", { method: "POST", body: "{}" });
+      await api("/api/reset-demo", {
+        method: "POST",
+        body: JSON.stringify({ today: today() }),
+      });
       afterWorkspaceReplaced();
       await loadDashboard();
       showStatus("样例数据已恢复");

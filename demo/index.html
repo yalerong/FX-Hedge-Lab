@@ -486,18 +486,100 @@
   ];
 
   // ---- gate:begin ---- 与 web_app.py:forecast_multiplier 逐行对应，改动必须两侧同步
-  function forecastMultiplier(signal, net) {
+  function numberOrNull(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function forecastDate(value) {
+    if (typeof value !== "string" || !value) return null;
+    var m = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    var d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function forecastIsFresh(signal, today) {
+    var generated = forecastDate(signal && signal.generated_at);
+    var asOf = forecastDate(today) || new Date();
+    if (!generated) return false;
+    var oneDay = 24 * 60 * 60 * 1000;
+    var ageDays = Math.round((Date.UTC(asOf.getUTCFullYear(), asOf.getUTCMonth(), asOf.getUTCDate()) -
+      generated.getTime()) / oneDay);
+    return ageDays >= 0 && ageDays <= 45;
+  }
+
+  function forecastRateForPeriod(signal, period) {
+    var rows = (signal && signal.forecast) || [];
+    if (!rows.length) return null;
+    var selected = rows[rows.length - 1];
+    if (period) {
+      var matching = rows.filter(function (row) { return row.month === period; });
+      if (matching.length) selected = matching[matching.length - 1];
+      else if (rows.some(function (row) { return row.month; })) return null;
+    }
+    return numberOrNull(selected && selected.rate);
+  }
+
+  function forecastExpectedMove(signal, period) {
+    if (!signal) return null;
+    var rate = forecastRateForPeriod(signal, period);
+    var current = numberOrNull(signal.current);
+    if (rate === null || !current) return null;
+    return Math.abs(rate / current - 1);
+  }
+
+  function liveForecastDirection(signal, liveSpot, period) {
+    var finalRate = forecastRateForPeriod(signal, period);
+    if (finalRate === null || liveSpot === null || liveSpot === undefined) {
+      return signal && (signal.direction === "up" || signal.direction === "down") ? signal.direction : null;
+    }
+    var spot = numberOrNull(liveSpot);
+    if (spot === null) return null;
+    if (finalRate > spot) return "up";
+    if (finalRate < spot) return "down";
+    return "flat";
+  }
+
+  function forecastMoveFromLive(signal, liveSpot, period) {
+    if (liveSpot === null || liveSpot === undefined) return forecastExpectedMove(signal, period);
+    var finalRate = forecastRateForPeriod(signal, period);
+    var spot = numberOrNull(liveSpot);
+    if (finalRate === null || spot === null || spot === 0) return null;
+    return Math.abs(finalRate / spot - 1);
+  }
+
+  function signalCoversPeriod(signal, period) {
+    if (!signal || !period) return true;
+    var months = ((signal.forecast || []).map(function (row) { return row.month; }).filter(Boolean));
+    if (!months.length) return true;
+    return months.indexOf(period) !== -1;
+  }
+
+  function forecastMultiplier(signal, net, period, liveSpot, today) {
     if (!signal) return [1.0, null];
-    var tier = signal.tier, direction = signal.direction;
+    if (!forecastIsFresh(signal, today)) {
+      return [1.0, "预测信号缺少生成时间或已超过 45 天，按目标比例锁汇"];
+    }
+    if (!signalCoversPeriod(signal, period)) {
+      var months = ((signal.forecast || []).map(function (row) { return row.month; }).filter(Boolean));
+      var span = months.length ? months.reduce(function (a, b) { return a < b ? a : b; }) + "~" +
+        months.reduce(function (a, b) { return a > b ? a : b; }) : "空";
+      return [1.0, "预测区间 " + span + " 覆盖不到 " + period + "，这段时间模型说不上话，按目标比例锁汇"];
+    }
+    var tier = signal.tier, direction = liveForecastDirection(signal, liveSpot, period);
     var unfavorable = net > 0 ? direction === "down" : direction === "up";
     if (tier !== "support" && tier !== "caution") {
       return [1.0, "模型质量不达标，忽略预测方向，按目标比例锁汇"];
+    }
+    if (direction !== "up" && direction !== "down") {
+      return [1.0, "预测终点与当前即期基本持平，按目标比例锁汇"];
     }
     if (unfavorable) {
       if (tier === "support") return [1.0, "模型质量达标，预测对你不利，按目标比例锁汇"];
       return [1.0, "模型质量一般，预测不利，按目标比例锁汇"];
     }
-    var move = signal.move, mape = signal.mape;
+    var move = forecastMoveFromLive(signal, liveSpot, period), mape = signal.mape;
     if (move !== null && move !== undefined && mape !== null && mape !== undefined && move <= mape) {
       return [1.0, "预测有利但幅度 " + pct1(move) + " 未超过模型误差 " + pct1(mape) +
         "，不足以支撑少锁，按目标比例锁汇"];
@@ -598,7 +680,16 @@
     paintSeg(tierSeg, state.tier);
     paintSeg(dirSeg, state.direction);
 
-    var res = forecastMultiplier(state, USD.net);
+    var finalRate = RATE.USD * (state.direction === "up" ? 1 + state.move : 1 - state.move);
+    var signal = {
+      tier: state.tier,
+      direction: state.direction,
+      mape: state.mape,
+      current: RATE.USD,
+      generated_at: new Date().toISOString(),
+      forecast: [{ month: "2026-06", rate: finalRate }]
+    };
+    var res = forecastMultiplier(signal, USD.net, "2026-06", RATE.USD);
     var mult = res[0], why = res[1];
     var ratio = parseFloat(ratioEl.value);
     var eff = ratio * mult;
@@ -615,9 +706,11 @@
     document.getElementById("effCell").textContent = pctTrim(eff);
     document.getElementById("amtCell").textContent = money(amt);
 
-    var unfavorable = USD.net > 0 ? state.direction === "down" : state.direction === "up";
+    var liveDirection = liveForecastDirection(signal, RATE.USD, "2026-06");
+    var unfavorable = USD.net > 0 ? liveDirection === "down" : liveDirection === "up";
     var qualityFired = state.tier !== "support" && state.tier !== "caution";
-    var snrFired = !qualityFired && !unfavorable && state.move <= state.mape;
+    var snrMove = forecastMoveFromLive(signal, RATE.USD, "2026-06");
+    var snrFired = !qualityFired && !unfavorable && snrMove !== null && snrMove <= state.mape;
     var gates = [
       [qualityFired, "档位闸门", "模型回测质量未达 support / caution，预测方向整体不采信。"],
       [!qualityFired && unfavorable, "方向闸门", "预测对当前敞口不利——不利一律足额锁，这条永不放松。"],

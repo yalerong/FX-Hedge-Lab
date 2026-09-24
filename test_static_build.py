@@ -90,8 +90,38 @@ class StaticBuildTest(unittest.TestCase):
 
         self.assertIn("${escapeHtml(row.trade_rate)}", source_js)
         self.assertNotIn("${row.trade_rate}", source_js)
+        self.assertIn('notes.map(escapeHtml).join("；")', source_js)
+        self.assertNotIn('${notes.join("；")}', source_js)
         self.assertIn('<button type="button" disabled>按建议填入锁汇单</button>', source_js)
         self.assertIn("if (!item.past_due)", source_js)
+
+    def test_productized_workflow_exposes_user_actions_without_new_dependencies(self):
+        source_html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        source_js = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        source_css = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertLess(source_html.index('id="todo"'), source_html.index('id="cockpit"'))
+        self.assertIn("primary-file-action", source_html)
+        self.assertEqual(source_html.count('id="importXlsxFile"'), 1)
+        self.assertIn('id="advancedConfig"', source_html)
+        self.assertLess(source_html.index('id="dataManagement"'), source_html.index('id="resetDemoBtn"'))
+        self.assertIn("TRADINGVIEW_CNY_CURRENCIES", source_js)
+        self.assertIn("www.tradingview.com/symbols/", source_js)
+        self.assertIn('rel="noopener noreferrer"', source_js)
+        self.assertIn("行情为参考价，真正可执行价格以银行远期报价为准", source_js)
+        self.assertIn("window.print()", source_js)
+        self.assertIn("item.forecast_direction || s.direction", source_js)
+        self.assertIn("data.rate_trial_reasons || []", source_js)
+        self.assertIn("请先刷新实时汇率", source_js)
+        self.assertIn("暂无可执行情景测算", source_js)
+        self.assertGreaterEqual(source_js.count("today: today()"), 2)
+        self.assertIn("建议动作", source_js)
+        self.assertIn("hedgeActionLabel(row.action)", source_js)
+        self.assertIn("recommendation_changed", source_js)
+        self.assertIn("Boolean(recommendation.length)", source_js)
+        self.assertIn('id="csvCollectionSelectData"', source_html)
+        self.assertIn("data-csv-collection-select", source_html)
+        self.assertIn("data-print-plan", source_css)
 
     def test_config_form_exposes_provisional_confirmation_flags(self):
         self.assertIn('name="confirmed_parameters"', self.html)
@@ -219,6 +249,7 @@ class StaticBuildTest(unittest.TestCase):
             'id="workspaceBadge"', 'id="setupPanel"', 'id="dataManagement"',
             'id="exportWorkspaceBtn"', 'id="importWorkspaceFile"',
             'id="csvCollectionSelect"', 'id="exportCsvBtn"', 'id="importCsvFile"',
+            'id="csvCollectionSelectData"',
             'id="exportXlsxBtn"', 'id="importXlsxFile"',
             'id="restoreLatestBackupBtn"', 'id="undoDeleteBtn"', 'id="clearBusinessBtn"',
             'name="supported_currencies"',

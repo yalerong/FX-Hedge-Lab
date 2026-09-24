@@ -89,6 +89,12 @@ def freeze(dashboard: dict, label: str | None, now_iso: str) -> dict:
 # 信号里只有这几项会改变折扣，存指纹而不是整个对象——
 # forecast 数组每月都变，拿整段去比会天天报"漂移"。
 SIGNAL_KEYS = ("tier", "direction", "mape", "n_test", "direction_accuracy")
+RECOMMENDATION_KEYS = (
+    "action",
+    "forecast_multiplier",
+    "effective_hedge_ratio",
+    "recommended_amount",
+)
 
 
 def _signal_fingerprint(signal: dict | None) -> dict | None:
@@ -109,11 +115,60 @@ def _diff_value(before, after) -> dict | None:
     return {"from": before, "to": after}
 
 
+def _recommendation_key(row: dict) -> tuple | None:
+    period = row.get("period")
+    currency = row.get("currency")
+    if period is None or currency is None:
+        return None
+    return period, currency
+
+
+def _recommendation_label(key: tuple) -> str:
+    return f"{key[0]}|{key[1]}"
+
+
+def _recommendation_changes(frozen_rows: list[dict], current_suggestions: list[dict] | None) -> dict:
+    if current_suggestions is None:
+        return {}
+
+    frozen = {
+        key: row
+        for row in frozen_rows
+        if (key := _recommendation_key(row)) is not None
+    }
+    current = {
+        key: row
+        for row in current_suggestions
+        if (key := _recommendation_key(row)) is not None
+    }
+
+    changed = {}
+    for key in sorted(set(frozen) | set(current)):
+        before = frozen.get(key)
+        after = current.get(key)
+        fields = {}
+        if before is None:
+            fields["status"] = {"from": "missing", "to": "present"}
+        elif after is None:
+            fields["status"] = {"from": "present", "to": "missing"}
+        for field in RECOMMENDATION_KEYS:
+            change = _diff_value(
+                before.get(field) if before else None,
+                after.get(field) if after else None,
+            )
+            if change:
+                fields[field] = change
+        if fields:
+            changed[_recommendation_label(key)] = fields
+    return changed
+
+
 def drift(
     plan: dict | None,
     config: dict,
     pair_rates: dict,
     forecast_signals: dict | None = None,
+    current_suggestions: list[dict] | None = None,
 ) -> dict:
     """当前配置相对最近一份方案漂了什么。
 
@@ -136,6 +191,11 @@ def drift(
             scenario[key] = change
 
     # 预测信号变了，折扣就会变，建议金额跟着变——即使配置一个字没动。
+    recommendation_changed = _recommendation_changes(
+        plan.get("rows", []),
+        current_suggestions,
+    )
+
     signal_changed = {}
     signals = forecast_signals or {}
     for row in plan.get("rows", []):
@@ -172,7 +232,8 @@ def drift(
         "created_at": plan.get("created_at"),
         "decision_changed": decision,
         "scenario_changed": scenario,
+        "recommendation_changed": recommendation_changed,
         "signal_changed": signal_changed,
         "rate_moved": rate_moves,
-        "stale": bool(decision) or bool(signal_changed),
+        "stale": bool(decision) or bool(signal_changed) or bool(recommendation_changed),
     }

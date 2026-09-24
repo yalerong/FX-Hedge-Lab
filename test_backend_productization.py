@@ -187,6 +187,43 @@ class BackendProductizationTest(unittest.TestCase):
             self.assertEqual(headers.get("X-Frame-Options"), "DENY")
             self.assertIn("frame-ancestors 'none'", headers.get("Content-Security-Policy", ""))
 
+    def test_web_static_paths_cannot_escape_web_root(self):
+        secret = web_app.DATA_DIR / "forecast_signals.json"
+        secret.write_text('{"secret": "not static"}', encoding="utf-8")
+
+        for path in (
+            "/web/../data/forecast_signals.json",
+            "/web/..%5cdata%5cforecast_signals.json",
+        ):
+            with self.subTest(path=path):
+                status, body, _ = http_text("GET", f"{self.base}{path}")
+                self.assertEqual(status, 404)
+                self.assertNotIn("not static", body)
+
+    def test_cached_refresh_error_blocks_plan_freeze(self):
+        saved_load_rates = web_app.load_rates
+        web_app.load_rates = lambda config, force=False: {
+            "source": "test",
+            "status": "cached_after_refresh_error",
+            "last_error": "timeout",
+            "fetched_at": "2026-05-12T00:00:00Z",
+            "pair_rates": {"USD": 7.2, "EUR": 7.8},
+        }
+        try:
+            status, body, _ = http_json("POST", f"{self.base}/api/plans", {"label": "unsafe"})
+        finally:
+            web_app.load_rates = saved_load_rates
+
+        self.assertEqual(status, 400)
+        self.assertIn("汇率", body["error"])
+
+    def test_non_loopback_bind_requires_explicit_allow_network(self):
+        self.assertTrue(web_app.is_loopback_host("127.0.0.2"))
+        self.assertTrue(web_app.is_loopback_host("[::1]"))
+        with self.assertRaises(ValueError):
+            web_app.require_allowed_bind("0.0.0.0")
+        web_app.require_allowed_bind("0.0.0.0", allow_network=True)
+
     def test_validation_rejects_bad_currency_dates_and_ranges(self):
         cases = [
             ("/api/exposures", {"due_date": "2027-01-31", "currency": "usd", "amount": 1, "direction": "receipt"}),
@@ -547,7 +584,7 @@ class BackendProductizationTest(unittest.TestCase):
             mock.patch.object(web_app, "FxRiskServer", return_value=fake_server),
             mock.patch("builtins.print") as printer,
         ):
-            web_app.run("0.0.0.0", 8765)
+            web_app.run("0.0.0.0", 8765, allow_network=True)
 
         messages = "\n".join(str(call.args[0]) for call in printer.call_args_list)
         self.assertIn("安全警告", messages)

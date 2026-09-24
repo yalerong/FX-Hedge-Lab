@@ -16,12 +16,13 @@ import threading
 import uuid
 import zipfile
 from collections import defaultdict
-from datetime import date as dt_date, datetime, timezone
+from datetime import date as dt_date, datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -42,6 +43,14 @@ AUDIT_LOG_FILE = DATA_DIR / "audit_log.jsonl"
 BACKUP_DIR = DATA_DIR / "backups"
 BASE_CURRENCY = "CNY"
 MAX_BACKUPS = 20
+MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024
+# Workspace JSON and base64-encoded XLSX imports are intentionally larger than
+# ordinary mutations. 64 MB keeps normal export/import round trips viable while
+# still bounding the in-memory JSON parser used by this zero-dependency server.
+MAX_IMPORT_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+REJECTED_BODY_DRAIN_BYTES = 64 * 1024
+REJECTED_BODY_DRAIN_TIMEOUT_SECONDS = 0.05
+FORECAST_MAX_AGE_DAYS = 45
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
@@ -266,6 +275,9 @@ def save_state(state: dict, reason: str = "state", backup: bool = True) -> None:
     # 删掉了仍有记录在用的币种）什么都没写，却会白吃一格备份槽位；
     # 重复几次就把真正有用的回滚快照挤没了。
     normalized = validate_workspace_state(state)
+    # 任何成功写入的工作区，都必须能用本应用导出的规范单副本 JSON
+    # 重新导入；不要等用户备份后才发现文件超过导入上限。
+    ensure_workspace_export_fits(normalized)
     if backup:
         backup_current_state(reason)
     write_json(STATE_FILE, normalized)
@@ -511,17 +523,90 @@ def empty_state(setup_complete: bool = False) -> dict:
     }
 
 
-def sample_state(keep_plans: list[dict] | None = None) -> dict:
+def add_months(value: dt_date, months: int) -> dt_date:
+    month_index = value.month - 1 + months
+    return dt_date(value.year + month_index // 12, month_index % 12 + 1, 1)
+
+
+def month_end(value: dt_date) -> str:
+    return (add_months(value, 1) - timedelta(days=1)).isoformat()
+
+
+def sample_state(keep_plans: list[dict] | None = None, today: dt_date | None = None) -> dict:
     state = copy.deepcopy(DEMO_STATE)
+    asof = today or dt_date.today()
+    future_due = month_end(add_months(asof, 3))
+    settled_due = month_end(add_months(asof, -1))
+    trade_date = add_months(asof, -1).replace(day=5).isoformat()
+    created_at = now_iso()
     state["metadata"] = {
         "setup_complete": True,
         "data_mode": "sample",
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
+        "created_at": created_at,
+        "updated_at": created_at,
     }
+    for row in state["exposures"]:
+        row["created_at"] = created_at
+        row["due_date"] = future_due
+    for row in state["hedges"]:
+        row["created_at"] = created_at
+        row["trade_date"] = asof.isoformat()
+        row["due_date"] = future_due
+    state["settlements"] = []
+    state["exposures"].append({
+        "id": "demo-exp-settled",
+        "created_at": created_at,
+        "due_date": settled_due,
+        "currency": "USD",
+        "amount": 900000,
+        "direction": "receipt",
+        "category": "order_contract",
+        "description": "上月出口订单样例",
+        "probability": 1,
+    })
+    state["hedges"].append({
+        "id": "demo-hedge-settled",
+        "created_at": created_at,
+        "trade_date": trade_date,
+        "due_date": settled_due,
+        "currency": "USD",
+        "amount": 900000,
+        "action": "sell_foreign",
+        "locked_rate": 7.18,
+        "description": "上月远期结汇样例",
+    })
+    state["settlements"].append({
+        "id": "demo-settle-1",
+        "created_at": created_at,
+        "due_date": settled_due,
+        "currency": "USD",
+        "actual_rate": 7.21,
+        "actual_amount": 620000,
+        "description": "样例到期实际汇率",
+    })
     state["config"] = validate_config(state.get("config", {}), base=DEFAULT_CONFIG)
     state["plans"] = copy.deepcopy(keep_plans or [])
     return state
+
+
+def workspace_export_payload(state: dict, legacy: bool = False) -> dict:
+    payload = {
+        "ok": True,
+        "schema": "fx-workspace-v1",
+        "exported_at": now_iso(),
+        "metadata": state.get("metadata", {}),
+    }
+    payload["state" if legacy else "workspace"] = state
+    return payload
+
+
+def ensure_workspace_export_fits(state: dict) -> None:
+    size = max(
+        len(json.dumps(workspace_export_payload(state, legacy=legacy), ensure_ascii=False).encode("utf-8"))
+        for legacy in (False, True)
+    )
+    if size > MAX_IMPORT_REQUEST_BODY_BYTES:
+        raise ValueError("工作区已超过 64 MB 导入上限，请先删除历史方案或拆分数据")
 
 
 def validate_workspace_state(state: dict) -> dict:
@@ -716,6 +801,7 @@ def load_rates(config: dict, force: bool = False) -> dict:
         if cache:
             cache["status"] = "cached_after_refresh_error"
             cache["last_error"] = str(exc)
+            write_json(RATES_CACHE_FILE, cache)
             return cache
         cache = {
             "source": "built-in fallback rates",
@@ -739,22 +825,91 @@ def load_forecast_signals() -> dict:
         return {}
 
 
-def forecast_expected_move(signal: dict | None) -> float | None:
+def forecast_rate_for_period(signal: dict | None, period: str | None = None) -> float | None:
+    rows = (signal or {}).get("forecast") or []
+    if not rows:
+        return None
+    selected = rows[-1]
+    if period:
+        matching = [row for row in rows if row.get("month") == period]
+        if matching:
+            selected = matching[-1]
+        elif any(row.get("month") for row in rows):
+            return None
+    try:
+        return float(selected["rate"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def forecast_expected_move(signal: dict | None, period: str | None = None) -> float | None:
     """预测期末相对当前汇率的变动幅度（绝对值）。"""
     if not signal:
         return None
-    rows = signal.get("forecast") or []
+    forecast_rate = forecast_rate_for_period(signal, period)
     current = signal.get("current")
-    if not rows or not current:
+    if forecast_rate is None or not current:
         return None
     try:
-        final = float(rows[-1]["rate"])
         current = float(current)
-    except (KeyError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
     if current == 0:
         return None
-    return abs(final / current - 1)
+    return abs(forecast_rate / current - 1)
+
+
+def forecast_generated_date(signal: dict | None) -> dt_date | None:
+    value = (signal or {}).get("generated_at")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def forecast_is_fresh(signal: dict | None, today: dt_date | None = None) -> bool:
+    generated = forecast_generated_date(signal)
+    if generated is None:
+        return False
+    age_days = ((today or utc_now().date()) - generated).days
+    return 0 <= age_days <= FORECAST_MAX_AGE_DAYS
+
+
+def live_forecast_direction(
+    signal: dict | None, live_spot: float | None, period: str | None = None,
+) -> str | None:
+    final = forecast_rate_for_period(signal, period)
+    if live_spot is None:
+        direction = (signal or {}).get("direction")
+        return direction if direction in {"up", "down"} else None
+    if final is None:
+        return None
+    try:
+        spot = float(live_spot)
+    except (TypeError, ValueError):
+        return None
+    if final > spot:
+        return "up"
+    if final < spot:
+        return "down"
+    return "flat"
+
+
+def forecast_move_from_live(
+    signal: dict | None, live_spot: float | None, period: str | None = None,
+) -> float | None:
+    if live_spot is None:
+        return forecast_expected_move(signal, period)
+    final = forecast_rate_for_period(signal, period)
+    try:
+        spot = float(live_spot)
+    except (TypeError, ValueError):
+        return None
+    if final is None or spot == 0:
+        return None
+    return abs(final / spot - 1)
 
 
 def signal_covers_period(signal: dict | None, period: str | None) -> bool:
@@ -769,29 +924,39 @@ def signal_covers_period(signal: dict | None, period: str | None) -> bool:
     months = [row.get("month") for row in (signal.get("forecast") or []) if row.get("month")]
     if not months:
         return True
-    return min(months) <= period <= max(months)
+    return period in months
 
 
 def forecast_multiplier(
-    signal: dict | None, net: float, period: str | None = None
+    signal: dict | None,
+    net: float,
+    period: str | None = None,
+    live_spot: float | None = None,
+    today: dt_date | None = None,
 ) -> tuple[float, str | None]:
     if not signal:
         return 1.0, None
+    if not forecast_is_fresh(signal, today):
+        return 1.0, "预测信号缺少生成时间或已超过 45 天，按目标比例锁汇"
     if not signal_covers_period(signal, period):
         months = [row.get("month") for row in (signal.get("forecast") or []) if row.get("month")]
         span = f"{min(months)}~{max(months)}" if months else "空"
         return 1.0, f"预测区间 {span} 覆盖不到 {period}，这段时间模型说不上话，按目标比例锁汇"
+    if live_spot is not None and forecast_rate_for_period(signal, period) is None:
+        return 1.0, "到期月份的预测汇率无效，按目标比例锁汇"
     tier = signal.get("tier")
-    direction = signal.get("direction")
+    direction = live_forecast_direction(signal, live_spot, period)
     unfavorable = (direction == "down") if net > 0 else (direction == "up")
     if tier not in ("support", "caution"):
         return 1.0, "模型质量不达标，忽略预测方向，按目标比例锁汇"
+    if direction not in {"up", "down"}:
+        return 1.0, "预测终点与当前即期基本持平，按目标比例锁汇"
     if unfavorable:
         if tier == "support":
             return 1.0, "模型质量达标，预测对你不利，按目标比例锁汇"
         return 1.0, "模型质量一般，预测不利，按目标比例锁汇"
     # 信噪比闸门：预测幅度没超过模型自身误差，就不足以支撑少锁
-    move = forecast_expected_move(signal)
+    move = forecast_move_from_live(signal, live_spot, period)
     mape = signal.get("mape")
     if move is not None and mape is not None and move <= mape:
         return 1.0, f"预测有利但幅度 {move:.1%} 未超过模型误差 {mape:.1%}，不足以支撑少锁，按目标比例锁汇"
@@ -834,21 +999,33 @@ def current_rate(pair_rates: dict[str, float], currency: str) -> float | None:
     return None if value is None else float(value)
 
 
+def rate_actionability(rates_cache: dict) -> tuple[bool, bool, list[str]]:
+    status = rates_cache.get("status")
+    if status == "fallback":
+        return False, False, ["内置兜底汇率不可作为执行报价"]
+    if status == "cached_after_refresh_error":
+        reason = "汇率刷新失败，缓存汇率仅可试算"
+        if rates_cache.get("last_error"):
+            reason = f"{reason}：{rates_cache['last_error']}"
+        return False, True, [reason]
+    return True, True, []
+
+
 def trial_reasons_for(config: dict, currency: str, period: str, forward_basis: str) -> list[str]:
     reasons: list[str] = []
     confirmed = config.get("confirmed_parameters") or {}
     if not confirmed.get("rates"):
-        reasons.append("confirm current spot rates before execution")
+        reasons.append("执行前请核对当前即期汇率")
     if forward_basis != "quote":
-        reasons.append("confirm bank forward quote before execution")
+        reasons.append("执行前请向银行确认远期报价")
     if not confirmed.get("interest_rates"):
-        reasons.append("confirm funding rates before relying on CIP pricing")
+        reasons.append("使用利率平价试算前请核对资金利率")
     ratios = config.get("month_currency_hedge_ratios") or {}
     if not (ratios.get(f"{period}:{currency}") is not None or
             (isinstance(ratios.get(period), dict) and ratios[period].get(currency) is not None)):
-        reasons.append("confirm target hedge ratio for this month and currency")
+        reasons.append("请确认本月该币种的目标套保比例")
     if not confirmed.get("scenario_shifts"):
-        reasons.append("confirm scenario assumptions")
+        reasons.append("请确认损益场景假设")
     return reasons
 
 
@@ -1040,6 +1217,7 @@ def build_dashboard(
     suggestions = []
     scenario_rows = []
     scenario_rates = scenario_rates_for(pair_rates, config)
+    rates_actionable, rates_can_show_trials, rate_trial_reasons = rate_actionability(rates_cache)
     scenario_summary: dict[str, dict[str, dict]] = {}
     risk_limit = float(config.get("risk_limit_cny", 0) or 0)
     for period, currency in keys:
@@ -1079,11 +1257,14 @@ def build_dashboard(
                 "over_risk_limit": bool(rate_available and risk_limit > 0 and cny_risk > risk_limit),
             }
         )
-        if not rate_available:
+        if not rate_available or not rates_can_show_trials:
             continue
 
         signal = forecast_signals.get(currency)
-        multiplier, multiplier_reason = forecast_multiplier(signal, net, period)
+        if signal and forecast_doc.get("generated_at") and not signal.get("generated_at"):
+            signal = {**signal, "generated_at": forecast_doc["generated_at"]}
+        multiplier, multiplier_reason = forecast_multiplier(signal, net, period, live_spot=rate, today=today)
+        effective_forecast_direction = live_forecast_direction(signal, rate, period) if signal else None
         effective_ratio = target_ratio * multiplier
         target_cover = D(abs(gross)) * D(effective_ratio)
         covered = D(abs(hedged))
@@ -1123,7 +1304,7 @@ def build_dashboard(
             )
 
         if abs(net) > 0 and recommended_amount > 0:
-            trial_reasons = trial_reasons_for(config, currency, period, fwd["basis"])
+            trial_reasons = rate_trial_reasons + trial_reasons_for(config, currency, period, fwd["basis"])
             recommendation = {
                 "period": period,
                 "currency": currency,
@@ -1148,6 +1329,7 @@ def build_dashboard(
                 "forecast_multiplier": fN(multiplier, 4),
                 "forecast_reason": multiplier_reason,
                 "forecast_signal": signal,
+                "forecast_direction": effective_forecast_direction,
                 "recommended_amount": f2(recommended_amount),
                 "action": action,
                 "direction_unexpected": direction_is_unexpected(config, net),
@@ -1164,7 +1346,13 @@ def build_dashboard(
     portfolio = build_portfolio(net_rows, suggestions)
     plan_list = state.get("plans", [])
     latest_plan = plan_list[-1] if plan_list else None
-    plan_drift = plans.drift(latest_plan, config, pair_rates, forecast_signals)
+    plan_drift = plans.drift(
+        latest_plan,
+        config,
+        pair_rates,
+        forecast_signals,
+        current_suggestions=suggestions,
+    )
     return {
         "workspace": {
             "metadata": state.get("metadata", {}),
@@ -1175,6 +1363,8 @@ def build_dashboard(
         },
         "config": config,
         "rates": rates_cache,
+        "rates_actionable": rates_actionable,
+        "rate_trial_reasons": rate_trial_reasons,
         "exposures": exposures,
         "hedges": hedges,
         "settlements": settlements,
@@ -1542,15 +1732,46 @@ def build_plain_language(
     return lines
 
 
+def request_body_limit(path: str) -> int:
+    if urlparse(path).path in {"/api/import", "/api/workspace/import", "/api/xlsx/import"}:
+        return MAX_IMPORT_REQUEST_BODY_BYTES
+    return MAX_REQUEST_BODY_BYTES
+
+
 def parse_body(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length", "0"))
     if length <= 0:
         return {}
+    limit = request_body_limit(handler.path)
+    if length > limit:
+        raise ValueError(f"请求体不能超过 {limit // (1024 * 1024)} MB")
     content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise TypeError("POST/PUT 请求必须使用 application/json")
     raw = handler.rfile.read(length).decode("utf-8")
     return json.loads(raw) if raw else {}
+
+
+def close_rejected_request(handler: BaseHTTPRequestHandler) -> None:
+    """Bound any drain so rejected slow clients cannot pin a handler thread."""
+    handler.close_connection = True
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        return
+    if length <= 0:
+        return
+    previous_timeout = handler.connection.gettimeout()
+    try:
+        handler.connection.settimeout(REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
+        handler.rfile.read(min(length, REJECTED_BODY_DRAIN_BYTES))
+    except (OSError, TimeoutError):
+        pass
+    finally:
+        try:
+            handler.connection.settimeout(previous_timeout)
+        except OSError:
+            pass
 
 
 def add_id(row: dict, preserve_existing: bool = True) -> dict:
@@ -1572,6 +1793,18 @@ def mutable_collection(name: str) -> str | None:
         "settlements": "settlements",
         "plans": "plans",
     }.get(name)
+
+
+def web_static_path(request_path: str) -> Path | None:
+    if not request_path.startswith("/web/"):
+        return None
+    relative = unquote(request_path[len("/web/"):])
+    candidate = (WEB_ROOT / relative).resolve()
+    try:
+        candidate.relative_to(WEB_ROOT.resolve())
+    except ValueError:
+        return None
+    return candidate
 
 
 def validate_for_collection(collection: str, row: dict, config: dict | None = None) -> None:
@@ -1918,7 +2151,11 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_ROOT / "index.html")
             return
         if path.startswith("/web/"):
-            self.serve_file(ROOT / path.lstrip("/"))
+            static_path = web_static_path(path)
+            if static_path is None:
+                self.send_error(404)
+                return
+            self.serve_file(static_path)
             return
         if path == "/api/state":
             state = ensure_state()
@@ -1927,15 +2164,11 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             return
         if path in {"/api/export", "/api/workspace/export"}:
             state = validate_workspace_state(ensure_state())
-            self.send_json({
-                "ok": True,
-                "exported_at": now_iso(),
-                "data_file": str(STATE_FILE),
-                "state": state,
-                "workspace": state,
-                "metadata": state.get("metadata", {}),
-                "backups": list_backups(),
-            })
+            try:
+                ensure_workspace_export_fits(state)
+                self.send_json(workspace_export_payload(state, legacy=path == "/api/export"))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=413)
             return
         if path == "/api/backups":
             self.send_json({"backups": list_backups(), "data_file": str(STATE_FILE)})
@@ -1968,6 +2201,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
+                close_rejected_request(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             body = parse_body(self)
@@ -2029,6 +2263,8 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     return
                 if self.path == "/api/plans":
                     dashboard = build_dashboard(state, plan_rates)
+                    if not dashboard.get("rates_actionable", True):
+                        raise ValueError("当前汇率不可作为执行报价，请刷新汇率后再冻结方案")
                     if dashboard["portfolio"].get("rate_missing"):
                         raise ValueError("存在缺失汇率的敞口，不能冻结为完整方案")
                     if not dashboard["suggestions"]:
@@ -2044,7 +2280,8 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     before_reset = state
                     # 方案是只读存档，"恢复样例"的语义是重置工作数据，
                     # 不该连历史快照一起抹掉——那是不可逆的，确认框也没提。
-                    reset_state = sample_state(keep_plans=state.get("plans", []))
+                    sample_today = parse_iso_date(body["today"], "today") if body.get("today") else None
+                    reset_state = sample_state(keep_plans=state.get("plans", []), today=sample_today)
                     save_state(reset_state, reason="reset-demo")
                     # 先写盘再记日志：反过来的话，写盘失败会在只追加的历史里
                     # 永久留下一条"重置过"的假记录。
@@ -2100,7 +2337,8 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     return
                 if self.path == "/api/workspace/sample":
                     before_sample = state
-                    next_state = sample_state(keep_plans=state.get("plans", []))
+                    sample_today = parse_iso_date(body["today"], "today") if body.get("today") else None
+                    next_state = sample_state(keep_plans=state.get("plans", []), today=sample_today)
                     save_state(next_state, reason="sample-workspace")
                     append_audit("reset", "workspace", None, before_sample, next_state)
                     self.send_json({"ok": True, "metadata": next_state["metadata"]})
@@ -2138,6 +2376,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
+                close_rejected_request(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             parts = self.path.strip("/").split("/")
@@ -2177,6 +2416,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
         blocked = check_mutation_headers(self)
         if blocked:
             status, message = blocked
+            close_rejected_request(self)
             self.send_json({"ok": False, "error": message}, status=status)
             return
         parts = self.path.strip("/").split("/")
@@ -2348,10 +2588,27 @@ class FxRiskServer(ThreadingHTTPServer):
     request_queue_size = 64
 
 
-def run(host: str, port: int) -> None:
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def require_allowed_bind(host: str, allow_network: bool = False) -> None:
+    if allow_network or is_loopback_host(host):
+        return
+    raise ValueError("非本机地址绑定需要显式传入 --allow-network")
+
+
+def run(host: str, port: int, allow_network: bool = False) -> None:
     ensure_state()
+    require_allowed_bind(host, allow_network)
     server = FxRiskServer((host, port), FxRiskHandler)
-    if host.strip("[]").lower() not in {"127.0.0.1", "localhost", "::1"}:
+    if not is_loopback_host(host):
         print("安全警告：当前服务可被其他设备访问，但未提供身份认证；请勿在公网或不可信网络中使用。")
     print(f"FX risk web app running at http://{host}:{port}")
     server.serve_forever()
@@ -2361,8 +2618,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local FX risk web app.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--allow-network", action="store_true")
     args = parser.parse_args()
-    run(args.host, args.port)
+    run(args.host, args.port, allow_network=args.allow_network)
 
 
 if __name__ == "__main__":

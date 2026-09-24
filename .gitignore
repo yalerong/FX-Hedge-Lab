@@ -8,4 +8,5 @@ data/events/events.csv
 # wrangler 本地部署缓存（含账号信息，不进仓库）
 .wrangler/
 data/audit_log.jsonl
+data/backups/
 demo/_static/
