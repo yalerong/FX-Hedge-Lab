@@ -85,7 +85,7 @@
             </div>
             <div class="data-actions">
               <label>明细类型
-                <select id="csvCollectionSelect">
+                <select id="csvCollectionSelect" data-csv-collection-select>
                   <option value="exposures">敞口明细</option>
                   <option value="hedges">锁汇明细</option>
                   <option value="settlements">结算明细</option>
@@ -335,6 +335,13 @@
             <button id="clearBusinessBtn" type="button" class="danger-outline">清空业务数据</button>
           </div>
           <div class="data-actions data-actions-secondary">
+            <label>明细类型
+              <select id="csvCollectionSelectData" data-csv-collection-select>
+                <option value="exposures">敞口明细</option>
+                <option value="hedges">锁汇明细</option>
+                <option value="settlements">结算明细</option>
+              </select>
+            </label>
             <button id="exportCsvBtn" type="button" class="secondary">导出明细 CSV</button>
             <label class="file-action">导入明细 CSV <input id="importCsvFile" type="file" accept=".csv,text/csv" /></label>
             <button id="exportXlsxBtn" type="button" class="secondary">导出明细 Excel</button>

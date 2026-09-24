@@ -110,6 +110,12 @@ class StaticBuildTest(unittest.TestCase):
         self.assertIn('rel="noopener noreferrer"', source_js)
         self.assertIn("行情为参考价，真正可执行价格以银行远期报价为准", source_js)
         self.assertIn("window.print()", source_js)
+        self.assertIn("建议动作", source_js)
+        self.assertIn("hedgeActionLabel(row.action)", source_js)
+        self.assertIn("recommendation_changed", source_js)
+        self.assertIn("Boolean(recommendation.length)", source_js)
+        self.assertIn('id="csvCollectionSelectData"', source_html)
+        self.assertIn("data-csv-collection-select", source_html)
         self.assertIn("data-print-plan", source_css)
 
     def test_config_form_exposes_provisional_confirmation_flags(self):
@@ -238,6 +244,7 @@ class StaticBuildTest(unittest.TestCase):
             'id="workspaceBadge"', 'id="setupPanel"', 'id="dataManagement"',
             'id="exportWorkspaceBtn"', 'id="importWorkspaceFile"',
             'id="csvCollectionSelect"', 'id="exportCsvBtn"', 'id="importCsvFile"',
+            'id="csvCollectionSelectData"',
             'id="exportXlsxBtn"', 'id="importXlsxFile"',
             'id="restoreLatestBackupBtn"', 'id="undoDeleteBtn"', 'id="clearBusinessBtn"',
             'name="supported_currencies"',

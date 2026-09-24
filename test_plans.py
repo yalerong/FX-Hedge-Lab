@@ -105,6 +105,111 @@ class PlanSnapshotTest(unittest.TestCase):
         self.assertEqual(result["signal_changed"], {})
         self.assertFalse(result["stale"])
 
+    def test_identical_current_recommendations_are_not_drift(self):
+        row = {
+            "period": "2026-11", "currency": "USD", "action": "sell_foreign",
+            "business_exposure": 1000, "covered_exposure": 0, "net_exposure": 1000,
+            "target_hedge_ratio": 0.8, "forecast_multiplier": 0.5,
+            "effective_hedge_ratio": 0.4, "recommended_amount": 400,
+        }
+        plan = plans.freeze(
+            {"suggestions": [row], "config": {}, "rates": {}},
+            None, "2026-05-12T00:00:00Z",
+        )
+
+        result = plans.drift(plan, {}, {}, current_suggestions=[dict(row)])
+
+        self.assertEqual(result["recommendation_changed"], {})
+        self.assertFalse(result["stale"])
+
+    def test_recomputed_recommendation_change_makes_the_plan_stale(self):
+        row = {
+            "period": "2026-11", "currency": "USD", "action": "sell_foreign",
+            "business_exposure": 1000, "covered_exposure": 0, "net_exposure": 1000,
+            "target_hedge_ratio": 0.8, "forecast_multiplier": 0.5,
+            "effective_hedge_ratio": 0.4, "recommended_amount": 400,
+        }
+        plan = plans.freeze(
+            {"suggestions": [row], "config": {}, "rates": {}},
+            None, "2026-05-12T00:00:00Z",
+        )
+        current = [dict(row, forecast_multiplier=1.0, effective_hedge_ratio=0.8,
+                        recommended_amount=800)]
+
+        result = plans.drift(plan, {}, {}, current_suggestions=current)
+
+        self.assertTrue(result["stale"])
+        self.assertEqual(result["decision_changed"], {})
+        self.assertEqual(result["signal_changed"], {})
+        self.assertEqual(
+            result["recommendation_changed"]["2026-11|USD"]["forecast_multiplier"],
+            {"from": 0.5, "to": 1.0},
+        )
+        self.assertEqual(
+            result["recommendation_changed"]["2026-11|USD"]["recommended_amount"],
+            {"from": 400, "to": 800},
+        )
+
+    def test_recommendation_removed_or_added_makes_the_plan_stale(self):
+        usd = {
+            "period": "2026-11", "currency": "USD", "action": "sell_foreign",
+            "business_exposure": 1000, "covered_exposure": 0, "net_exposure": 1000,
+            "target_hedge_ratio": 0.8, "forecast_multiplier": 0.5,
+            "effective_hedge_ratio": 0.4, "recommended_amount": 400,
+        }
+        eur = dict(usd, currency="EUR", action="buy_foreign")
+        plan = plans.freeze(
+            {"suggestions": [usd], "config": {}, "rates": {}},
+            None, "2026-05-12T00:00:00Z",
+        )
+
+        result = plans.drift(plan, {}, {}, current_suggestions=[eur])
+
+        self.assertTrue(result["stale"])
+        self.assertEqual(
+            result["recommendation_changed"]["2026-11|USD"]["status"],
+            {"from": "present", "to": "missing"},
+        )
+        self.assertEqual(
+            result["recommendation_changed"]["2026-11|EUR"]["status"],
+            {"from": "missing", "to": "present"},
+        )
+
+    def test_spot_crossing_forecast_endpoint_is_recommendation_drift(self):
+        state = web_app.empty_state()
+        state["exposures"] = [{
+            "id": "e1", "due_date": "2026-11-30", "currency": "USD",
+            "amount": 1000, "direction": "receipt", "category": "cash_flow",
+            "probability": 1,
+        }]
+        signal = {
+            "tier": "support", "direction": "up", "mape": 0.018,
+            "n_test": 30, "direction_accuracy": 0.62, "current": 7.2,
+            "forecast": [{"month": "2026-11", "rate": 7.35}],
+        }
+        forecast_doc = {"generated_at": "2026-05-12T00:00:00Z", "signals": {"USD": signal}}
+        frozen_data = web_app.build_dashboard(
+            state, RATES, forecast_doc=forecast_doc, today=date(2026, 5, 12),
+        )
+        plan = plans.freeze(frozen_data, None, "2026-05-12T00:00:00Z")
+        self.assertEqual(plan["rows"][0]["forecast_multiplier"], 0.5)
+
+        current_rates = dict(RATES, pair_rates={"USD": 7.4, "EUR": 7.8})
+        current_data = web_app.build_dashboard(
+            state, current_rates, forecast_doc=forecast_doc, today=date(2026, 5, 12),
+        )
+        result = plans.drift(
+            plan, frozen_data["config"], current_rates["pair_rates"], {"USD": signal},
+            current_suggestions=current_data["suggestions"],
+        )
+
+        self.assertEqual(result["signal_changed"], {})
+        self.assertTrue(result["stale"])
+        self.assertEqual(
+            result["recommendation_changed"]["2026-11|USD"]["forecast_multiplier"],
+            {"from": 0.5, "to": 1.0},
+        )
+
     def test_signal_horizon_change_alone_makes_the_plan_stale(self):
         """档位方向都没变，只是预测区间挪了——折扣照样会从 0.5 跳回 1.0。
 

@@ -13,6 +13,10 @@ const CONFIG_PERCENT_FIELDS = new Set([
   "custom_scenario_shift_pct",
 ]);
 const TRADINGVIEW_CNY_CURRENCIES = new Set(["USD", "EUR", "JPY", "HKD", "GBP", "AUD", "SGD", "CAD", "CHF", "NZD"]);
+const HEDGE_ACTION_LABELS = {
+  sell_foreign: "卖出外币/远期结汇",
+  buy_foreign: "买入外币/远期购汇",
+};
 
 function showStatus(message, type = "ok") {
   const box = document.getElementById("statusBar");
@@ -22,6 +26,10 @@ function showStatus(message, type = "ok") {
 
 function money(value) {
   return fmt.format(Number(value || 0));
+}
+
+function hedgeActionLabel(action) {
+  return HEDGE_ACTION_LABELS[action] || action || "—";
 }
 
 function localToday() {
@@ -808,9 +816,7 @@ function renderHedgeTable(rows) {
     { render: (row) => escapeHtml(row.due_date) },
     { render: (row) => escapeHtml(row.currency) },
     {
-      render: (row) => row.action === "sell_foreign"
-        ? "卖出外币/远期结汇"
-        : "买入外币/远期购汇",
+      render: (row) => escapeHtml(hedgeActionLabel(row.action)),
     },
     { render: (row) => money(row.amount), cls: "num" },
     { render: (row) => escapeHtml(row.locked_rate), cls: "num" },
@@ -1004,7 +1010,9 @@ function renderPlanDrift(drift) {
   const parts = [];
   const decision = Object.entries(drift.decision_changed || {});
   const scenario = Object.entries(drift.scenario_changed || {});
+  const recommendation = Object.entries(drift.recommendation_changed || {});
   const rates = Object.entries(drift.rate_moved || {});
+  const isStale = Boolean(drift.stale) || Boolean(recommendation.length);
 
   if (decision.length) {
     parts.push(`<p><b>影响建议金额的参数已改：</b>${decision.map(([key, change]) =>
@@ -1014,6 +1022,23 @@ function renderPlanDrift(drift) {
   if (scenario.length) {
     parts.push(`<p class="meta">只影响损益模拟、不影响建议金额的改动：${scenario.map(([key]) =>
       escapeHtml(DECISION_LABELS[key] || key)).join("、")}</p>`);
+  }
+  if (recommendation.length) {
+    const labels = {
+      status: "建议状态",
+      action: "操作方向",
+      forecast_multiplier: "预测折扣",
+      effective_hedge_ratio: "有效套保比例",
+      recommended_amount: "建议金额",
+    };
+    parts.push(`<p><b>冻结方案里的建议已变：</b>${recommendation.map(([rowKey, changes]) => {
+      const fields = Object.entries(changes || {}).map(([field, change]) => {
+        const from = field === "action" ? hedgeActionLabel(change.from) : auditValue(change.from);
+        const to = field === "action" ? hedgeActionLabel(change.to) : auditValue(change.to);
+        return `${escapeHtml(labels[field] || field)} ${escapeHtml(from)} → ${escapeHtml(to)}`;
+      });
+      return `${escapeHtml(rowKey)}：${fields.join("、")}`;
+    }).join("；")}</p>`);
   }
   const signals = Object.entries(drift.signal_changed || {});
   if (signals.length) {
@@ -1030,8 +1055,8 @@ function renderPlanDrift(drift) {
     return;
   }
   box.innerHTML = `
-    <div class="item ${drift.stale ? "warn-item" : ""}">
-      <strong>${drift.stale ? "当前建议已经不是方案里的那份" : "方案与当前建议一致"}</strong>
+    <div class="item ${isStale ? "warn-item" : ""}">
+      <strong>${isStale ? "当前建议已经不是方案里的那份" : "方案与当前建议一致"}</strong>
       <p class="meta">对比对象：「${escapeHtml(drift.label || "-")}」，冻结于 ${escapeHtml(fmtTime(drift.created_at))}</p>
       ${parts.join("")}
     </div>
@@ -1055,6 +1080,7 @@ function renderPlans(rows) {
     const lines = (plan.rows || []).map((row) => `
       <tr>
         <td>${escapeHtml(row.period)} ${escapeHtml(row.currency)}</td>
+        <td>${escapeHtml(hedgeActionLabel(row.action))}</td>
         <td class="num">${ratioText(row.target_hedge_ratio)}</td>
         <td class="num">${Number(row.forecast_multiplier).toFixed(2)}×</td>
         <td class="num">${money(row.recommended_amount)}</td>
@@ -1069,7 +1095,7 @@ function renderPlans(rows) {
       <p class="notice plan-print-note">方案为冻结快照，行情与参数仅用于当时建议复盘；交易执行仍以银行远期报价、内部授权和实际成交为准。</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>期间/币种</th><th>目标比例</th><th>折扣</th><th>建议金额</th><th>交易汇率</th></tr></thead>
+          <thead><tr><th>期间/币种</th><th>建议动作</th><th>目标比例</th><th>折扣</th><th>建议金额</th><th>交易汇率</th></tr></thead>
           <tbody>${lines}</tbody>
         </table>
       </div>
@@ -1201,6 +1227,7 @@ function bindDataManagement() {
   if (importCsvFile) importCsvFile.addEventListener("change", importCsv);
   if (exportXlsxBtn) exportXlsxBtn.addEventListener("click", exportXlsx);
   if (importXlsxFile) importXlsxFile.addEventListener("change", importXlsx);
+  bindCsvCollectionSelectors();
   if (restoreBtn) restoreBtn.addEventListener("click", restoreLatestBackup);
   if (clearBtn) clearBtn.addEventListener("click", clearBusinessData);
   if (undoBtn) {
@@ -1209,8 +1236,19 @@ function bindDataManagement() {
   }
 }
 
+function bindCsvCollectionSelectors() {
+  const selects = Array.from(document.querySelectorAll("[data-csv-collection-select]"));
+  selects.forEach((select) => {
+    select.addEventListener("change", () => {
+      selects.forEach((other) => {
+        if (other !== select) other.value = select.value;
+      });
+    });
+  });
+}
+
 function selectedCsvCollection() {
-  const select = document.getElementById("csvCollectionSelect");
+  const select = document.querySelector("[data-csv-collection-select]");
   return select ? select.value : "exposures";
 }
 

@@ -44,6 +44,12 @@ BACKUP_DIR = DATA_DIR / "backups"
 BASE_CURRENCY = "CNY"
 MAX_BACKUPS = 20
 MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024
+# Workspace JSON and base64-encoded XLSX imports are intentionally larger than
+# ordinary mutations. 64 MB keeps normal export/import round trips viable while
+# still bounding the in-memory JSON parser used by this zero-dependency server.
+MAX_IMPORT_REQUEST_BODY_BYTES = 64 * 1024 * 1024
+REJECTED_BODY_DRAIN_BYTES = 64 * 1024
+REJECTED_BODY_DRAIN_TIMEOUT_SECONDS = 0.05
 FORECAST_MAX_AGE_DAYS = 45
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -772,6 +778,7 @@ def load_rates(config: dict, force: bool = False) -> dict:
         if cache:
             cache["status"] = "cached_after_refresh_error"
             cache["last_error"] = str(exc)
+            write_json(RATES_CACHE_FILE, cache)
             return cache
         cache = {
             "source": "built-in fallback rates",
@@ -795,22 +802,38 @@ def load_forecast_signals() -> dict:
         return {}
 
 
-def forecast_expected_move(signal: dict | None) -> float | None:
+def forecast_rate_for_period(signal: dict | None, period: str | None = None) -> float | None:
+    rows = (signal or {}).get("forecast") or []
+    if not rows:
+        return None
+    selected = rows[-1]
+    if period:
+        matching = [row for row in rows if row.get("month") == period]
+        if matching:
+            selected = matching[-1]
+        elif any(row.get("month") for row in rows):
+            return None
+    try:
+        return float(selected["rate"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def forecast_expected_move(signal: dict | None, period: str | None = None) -> float | None:
     """预测期末相对当前汇率的变动幅度（绝对值）。"""
     if not signal:
         return None
-    rows = signal.get("forecast") or []
+    forecast_rate = forecast_rate_for_period(signal, period)
     current = signal.get("current")
-    if not rows or not current:
+    if forecast_rate is None or not current:
         return None
     try:
-        final = float(rows[-1]["rate"])
         current = float(current)
-    except (KeyError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
     if current == 0:
         return None
-    return abs(final / current - 1)
+    return abs(forecast_rate / current - 1)
 
 
 def forecast_generated_date(signal: dict | None) -> dt_date | None:
@@ -831,18 +854,10 @@ def forecast_is_fresh(signal: dict | None, today: dt_date | None = None) -> bool
     return 0 <= age_days <= FORECAST_MAX_AGE_DAYS
 
 
-def forecast_final_rate(signal: dict | None) -> float | None:
-    rows = (signal or {}).get("forecast") or []
-    if not rows:
-        return None
-    try:
-        return float(rows[-1]["rate"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def live_forecast_direction(signal: dict | None, live_spot: float | None) -> str | None:
-    final = forecast_final_rate(signal)
+def live_forecast_direction(
+    signal: dict | None, live_spot: float | None, period: str | None = None,
+) -> str | None:
+    final = forecast_rate_for_period(signal, period)
     if final is None or live_spot is None:
         direction = (signal or {}).get("direction")
         return direction if direction in {"up", "down"} else None
@@ -857,10 +872,12 @@ def live_forecast_direction(signal: dict | None, live_spot: float | None) -> str
     return "flat"
 
 
-def forecast_move_from_live(signal: dict | None, live_spot: float | None) -> float | None:
+def forecast_move_from_live(
+    signal: dict | None, live_spot: float | None, period: str | None = None,
+) -> float | None:
     if live_spot is None:
-        return forecast_expected_move(signal)
-    final = forecast_final_rate(signal)
+        return forecast_expected_move(signal, period)
+    final = forecast_rate_for_period(signal, period)
     try:
         spot = float(live_spot)
     except (TypeError, ValueError):
@@ -882,7 +899,7 @@ def signal_covers_period(signal: dict | None, period: str | None) -> bool:
     months = [row.get("month") for row in (signal.get("forecast") or []) if row.get("month")]
     if not months:
         return True
-    return min(months) <= period <= max(months)
+    return period in months
 
 
 def forecast_multiplier(
@@ -901,7 +918,7 @@ def forecast_multiplier(
         span = f"{min(months)}~{max(months)}" if months else "空"
         return 1.0, f"预测区间 {span} 覆盖不到 {period}，这段时间模型说不上话，按目标比例锁汇"
     tier = signal.get("tier")
-    direction = live_forecast_direction(signal, live_spot)
+    direction = live_forecast_direction(signal, live_spot, period)
     unfavorable = (direction == "down") if net > 0 else (direction == "up")
     if tier not in ("support", "caution"):
         return 1.0, "模型质量不达标，忽略预测方向，按目标比例锁汇"
@@ -912,7 +929,7 @@ def forecast_multiplier(
             return 1.0, "模型质量达标，预测对你不利，按目标比例锁汇"
         return 1.0, "模型质量一般，预测不利，按目标比例锁汇"
     # 信噪比闸门：预测幅度没超过模型自身误差，就不足以支撑少锁
-    move = forecast_move_from_live(signal, live_spot)
+    move = forecast_move_from_live(signal, live_spot, period)
     mape = signal.get("mape")
     if move is not None and mape is not None and move <= mape:
         return 1.0, f"预测有利但幅度 {move:.1%} 未超过模型误差 {mape:.1%}，不足以支撑少锁，按目标比例锁汇"
@@ -1300,7 +1317,13 @@ def build_dashboard(
     portfolio = build_portfolio(net_rows, suggestions)
     plan_list = state.get("plans", [])
     latest_plan = plan_list[-1] if plan_list else None
-    plan_drift = plans.drift(latest_plan, config, pair_rates, forecast_signals)
+    plan_drift = plans.drift(
+        latest_plan,
+        config,
+        pair_rates,
+        forecast_signals,
+        current_suggestions=suggestions,
+    )
     return {
         "workspace": {
             "metadata": state.get("metadata", {}),
@@ -1680,12 +1703,19 @@ def build_plain_language(
     return lines
 
 
+def request_body_limit(path: str) -> int:
+    if urlparse(path).path in {"/api/import", "/api/workspace/import", "/api/xlsx/import"}:
+        return MAX_IMPORT_REQUEST_BODY_BYTES
+    return MAX_REQUEST_BODY_BYTES
+
+
 def parse_body(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length", "0"))
     if length <= 0:
         return {}
-    if length > MAX_REQUEST_BODY_BYTES:
-        raise ValueError("请求体不能超过 5 MB")
+    limit = request_body_limit(handler.path)
+    if length > limit:
+        raise ValueError(f"请求体不能超过 {limit // (1024 * 1024)} MB")
     content_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise TypeError("POST/PUT 请求必须使用 application/json")
@@ -1693,19 +1723,26 @@ def parse_body(handler: BaseHTTPRequestHandler) -> dict:
     return json.loads(raw) if raw else {}
 
 
-def discard_request_body(handler: BaseHTTPRequestHandler) -> None:
-    """Read a rejected small request body so Windows closes the socket cleanly."""
+def close_rejected_request(handler: BaseHTTPRequestHandler) -> None:
+    """Bound any drain so rejected slow clients cannot pin a handler thread."""
+    handler.close_connection = True
     try:
         length = int(handler.headers.get("Content-Length", "0"))
     except ValueError:
-        handler.close_connection = True
         return
     if length <= 0:
         return
-    if length > MAX_REQUEST_BODY_BYTES:
-        handler.close_connection = True
-        return
-    handler.rfile.read(length)
+    previous_timeout = handler.connection.gettimeout()
+    try:
+        handler.connection.settimeout(REJECTED_BODY_DRAIN_TIMEOUT_SECONDS)
+        handler.rfile.read(min(length, REJECTED_BODY_DRAIN_BYTES))
+    except (OSError, TimeoutError):
+        pass
+    finally:
+        try:
+            handler.connection.settimeout(previous_timeout)
+        except OSError:
+            pass
 
 
 def add_id(row: dict, preserve_existing: bool = True) -> dict:
@@ -2139,7 +2176,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
-                discard_request_body(self)
+                close_rejected_request(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             body = parse_body(self)
@@ -2312,7 +2349,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
-                discard_request_body(self)
+                close_rejected_request(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             parts = self.path.strip("/").split("/")
@@ -2352,7 +2389,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
         blocked = check_mutation_headers(self)
         if blocked:
             status, message = blocked
-            discard_request_body(self)
+            close_rejected_request(self)
             self.send_json({"ok": False, "error": message}, status=status)
             return
         parts = self.path.strip("/").split("/")

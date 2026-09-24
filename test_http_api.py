@@ -207,6 +207,24 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(response.status, 400)
         self.assertIn("5 MB", body["error"])
 
+    def test_rejected_request_does_not_wait_for_declared_body(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_address[1], timeout=2,
+        )
+        try:
+            connection.putrequest("POST", "/api/exposures")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", "1024")
+            connection.putheader("Origin", "https://evil.example")
+            connection.endheaders()
+            response = connection.getresponse()
+            body = json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+
+        self.assertEqual(response.status, 403)
+        self.assertIn("origin", body["error"].lower())
+
     def test_config_update_is_merged_not_replaced(self):
         status, payload = request("POST", f"{self.base}/api/config", {"default_hedge_ratio": 0.6})
         self.assertEqual(status, 200)
@@ -245,6 +263,31 @@ class HttpApiTest(unittest.TestCase):
             {},
         )
         self.assertEqual(status, 200)
+
+    def test_exported_workspace_over_old_limit_can_be_imported(self):
+        state = web_app.sample_state()
+        state["plans"] = [{
+            "id": "large-plan",
+            "label": "large export round trip",
+            "created_at": web_app.now_iso(),
+            "config": {},
+            "rate_snapshot": {"status": "live", "pair_rates": {"USD": 7.2}},
+            "rows": [{
+                "currency": "USD",
+                "period": "2026-12",
+                "action": "sell_foreign",
+                "forecast_reason": "x" * (6 * 1024 * 1024),
+            }],
+        }]
+        web_app.write_json(web_app.STATE_FILE, state)
+
+        status, exported = request("GET", f"{self.base}/api/workspace/export")
+        self.assertEqual(status, 200)
+        self.assertGreater(len(json.dumps(exported).encode("utf-8")), 5 * 1024 * 1024)
+
+        status, imported = request("POST", f"{self.base}/api/workspace/import", exported)
+        self.assertEqual(status, 200)
+        self.assertTrue(imported["ok"])
 
     def test_mutating_api_rejects_cross_origin_and_non_json_requests(self):
         status, body = request("POST", f"{self.base}/api/exposures", {

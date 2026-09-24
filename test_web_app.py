@@ -1,6 +1,10 @@
 import copy
+import json
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
+from unittest import mock
 
 import web_app
 
@@ -82,6 +86,57 @@ class WebAppLogicTest(unittest.TestCase):
         self.assertTrue(dashboard["suggestions"])
         self.assertTrue(all(row["trial"] for row in dashboard["suggestions"]))
         self.assertTrue(any("timeout" in reason for row in dashboard["suggestions"] for reason in row["trial_reasons"]))
+
+    def test_failed_rate_refresh_status_is_persisted_for_later_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_cache_file = web_app.RATES_CACHE_FILE
+            web_app.RATES_CACHE_FILE = Path(tmp) / "rates_cache.json"
+            web_app.RATES_CACHE_FILE.write_text(json.dumps({
+                "source": "test",
+                "status": "live",
+                "fetched_at": web_app.now_iso(),
+                "pair_rates": {"USD": 7.2},
+            }), encoding="utf-8")
+            try:
+                with mock.patch.object(web_app, "urlopen", side_effect=OSError("offline")):
+                    refreshed = web_app.load_rates(dict(web_app.DEFAULT_CONFIG), force=True)
+                persisted = web_app.load_rates(dict(web_app.DEFAULT_CONFIG))
+            finally:
+                web_app.RATES_CACHE_FILE = saved_cache_file
+
+        self.assertEqual(refreshed["status"], "cached_after_refresh_error")
+        self.assertEqual(persisted["status"], "cached_after_refresh_error")
+        self.assertIn("offline", persisted["last_error"])
+
+    def test_plan_drift_uses_recomputed_forecast_recommendations(self):
+        state = copy.deepcopy(web_app.DEMO_STATE)
+        state["hedges"] = []
+        forecast_doc = {
+            "generated_at": "2026-01-01T00:00:00Z",
+            "signals": {
+                "USD": {
+                    "tier": "support",
+                    "direction": "up",
+                    "current": 7.2,
+                    "mape": 0.01,
+                    "forecast": [{"month": "2026-06", "rate": 7.5}],
+                },
+            },
+        }
+        fresh = web_app.build_dashboard(
+            state, self.rates, forecast_doc=forecast_doc, today=date(2026, 1, 10),
+        )
+        state["plans"] = [web_app.plans.freeze(fresh, "fresh", "2026-01-10T00:00:00Z")]
+
+        stale = web_app.build_dashboard(
+            state, self.rates, forecast_doc=forecast_doc, today=date(2026, 3, 1),
+        )["plan_drift"]
+
+        self.assertTrue(stale["stale"])
+        self.assertEqual(
+            stale["recommendation_changed"]["2026-06|USD"]["forecast_multiplier"],
+            {"from": 0.5, "to": 1.0},
+        )
 
     def test_scenario_rows_cover_exposures_without_recommendation(self):
         # 已锁量超过目标覆盖量时不会再产生建议，但剩余敞口的浮动损益必须照样出现。

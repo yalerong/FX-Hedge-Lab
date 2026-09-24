@@ -245,6 +245,38 @@ class ForecastMultiplierTest(unittest.TestCase):
         )
         self.assertEqual(mult, 0.5)
 
+    def test_each_exposure_uses_its_own_forecast_month(self):
+        signal = self._signal(final=7.4, mape=0.01)
+        signal["forecast"] = [
+            {"month": "2026-10", "rate": 6.8},
+            {"month": "2026-11", "rate": 7.4},
+        ]
+
+        october, october_reason = web_app.forecast_multiplier(
+            signal, net=1000, period="2026-10", live_spot=7.0, today=date(2026, 5, 20),
+        )
+        november, _ = web_app.forecast_multiplier(
+            signal, net=1000, period="2026-11", live_spot=7.0, today=date(2026, 5, 20),
+        )
+
+        self.assertEqual(october, 1.0)
+        self.assertIn("不利", october_reason)
+        self.assertEqual(november, 0.5)
+
+    def test_missing_exact_forecast_month_does_not_discount(self):
+        signal = self._signal(final=7.4)
+        signal["forecast"] = [
+            {"month": "2026-10", "rate": 7.3},
+            {"month": "2026-12", "rate": 7.4},
+        ]
+
+        mult, reason = web_app.forecast_multiplier(
+            signal, net=1000, period="2026-11", live_spot=7.0, today=date(2026, 5, 20),
+        )
+
+        self.assertEqual(mult, 1.0)
+        self.assertIn("覆盖不到", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
