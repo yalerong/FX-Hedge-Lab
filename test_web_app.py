@@ -138,6 +138,39 @@ class WebAppLogicTest(unittest.TestCase):
             {"from": 0.5, "to": 1.0},
         )
 
+    def test_dashboard_exposes_live_recomputed_forecast_direction(self):
+        state = copy.deepcopy(web_app.DEMO_STATE)
+        state["hedges"] = []
+        rates = {**self.rates, "pair_rates": {"USD": 7.6, "EUR": 7.8}}
+        forecast_doc = {
+            "generated_at": "2026-01-01T00:00:00Z",
+            "signals": {
+                "USD": {
+                    "tier": "support",
+                    "direction": "up",
+                    "current": 7.2,
+                    "mape": 0.01,
+                    "forecast": [{"month": "2026-06", "rate": 7.5}],
+                },
+            },
+        }
+
+        dashboard = web_app.build_dashboard(
+            state, rates, forecast_doc=forecast_doc, today=date(2026, 1, 10),
+        )
+        usd = next(row for row in dashboard["suggestions"] if row["currency"] == "USD")
+
+        self.assertEqual(usd["forecast_signal"]["direction"], "up")
+        self.assertEqual(usd["forecast_direction"], "down")
+
+    def test_workspace_size_is_bounded_by_its_import_contract(self):
+        state = web_app.sample_state(today=date(2026, 9, 23))
+        state["plans"] = [{"label": "x" * 2000, "rows": []}]
+
+        with mock.patch.object(web_app, "MAX_IMPORT_REQUEST_BODY_BYTES", 1024):
+            with self.assertRaisesRegex(ValueError, "导入上限"):
+                web_app.ensure_workspace_export_fits(state)
+
     def test_scenario_rows_cover_exposures_without_recommendation(self):
         # 已锁量超过目标覆盖量时不会再产生建议，但剩余敞口的浮动损益必须照样出现。
         state = copy.deepcopy(web_app.DEMO_STATE)

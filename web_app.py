@@ -275,6 +275,9 @@ def save_state(state: dict, reason: str = "state", backup: bool = True) -> None:
     # 删掉了仍有记录在用的币种）什么都没写，却会白吃一格备份槽位；
     # 重复几次就把真正有用的回滚快照挤没了。
     normalized = validate_workspace_state(state)
+    # 任何成功写入的工作区，都必须能用本应用导出的规范单副本 JSON
+    # 重新导入；不要等用户备份后才发现文件超过导入上限。
+    ensure_workspace_export_fits(normalized)
     if backup:
         backup_current_state(reason)
     write_json(STATE_FILE, normalized)
@@ -531,7 +534,7 @@ def month_end(value: dt_date) -> str:
 
 def sample_state(keep_plans: list[dict] | None = None, today: dt_date | None = None) -> dict:
     state = copy.deepcopy(DEMO_STATE)
-    asof = today or utc_now().date()
+    asof = today or dt_date.today()
     future_due = month_end(add_months(asof, 3))
     settled_due = month_end(add_months(asof, -1))
     trade_date = add_months(asof, -1).replace(day=5).isoformat()
@@ -584,6 +587,26 @@ def sample_state(keep_plans: list[dict] | None = None, today: dt_date | None = N
     state["config"] = validate_config(state.get("config", {}), base=DEFAULT_CONFIG)
     state["plans"] = copy.deepcopy(keep_plans or [])
     return state
+
+
+def workspace_export_payload(state: dict, legacy: bool = False) -> dict:
+    payload = {
+        "ok": True,
+        "schema": "fx-workspace-v1",
+        "exported_at": now_iso(),
+        "metadata": state.get("metadata", {}),
+    }
+    payload["state" if legacy else "workspace"] = state
+    return payload
+
+
+def ensure_workspace_export_fits(state: dict) -> None:
+    size = max(
+        len(json.dumps(workspace_export_payload(state, legacy=legacy), ensure_ascii=False).encode("utf-8"))
+        for legacy in (False, True)
+    )
+    if size > MAX_IMPORT_REQUEST_BODY_BYTES:
+        raise ValueError("工作区已超过 64 MB 导入上限，请先删除历史方案或拆分数据")
 
 
 def validate_workspace_state(state: dict) -> dict:
@@ -858,9 +881,11 @@ def live_forecast_direction(
     signal: dict | None, live_spot: float | None, period: str | None = None,
 ) -> str | None:
     final = forecast_rate_for_period(signal, period)
-    if final is None or live_spot is None:
+    if live_spot is None:
         direction = (signal or {}).get("direction")
         return direction if direction in {"up", "down"} else None
+    if final is None:
+        return None
     try:
         spot = float(live_spot)
     except (TypeError, ValueError):
@@ -917,6 +942,8 @@ def forecast_multiplier(
         months = [row.get("month") for row in (signal.get("forecast") or []) if row.get("month")]
         span = f"{min(months)}~{max(months)}" if months else "空"
         return 1.0, f"预测区间 {span} 覆盖不到 {period}，这段时间模型说不上话，按目标比例锁汇"
+    if live_spot is not None and forecast_rate_for_period(signal, period) is None:
+        return 1.0, "到期月份的预测汇率无效，按目标比例锁汇"
     tier = signal.get("tier")
     direction = live_forecast_direction(signal, live_spot, period)
     unfavorable = (direction == "down") if net > 0 else (direction == "up")
@@ -1237,6 +1264,7 @@ def build_dashboard(
         if signal and forecast_doc.get("generated_at") and not signal.get("generated_at"):
             signal = {**signal, "generated_at": forecast_doc["generated_at"]}
         multiplier, multiplier_reason = forecast_multiplier(signal, net, period, live_spot=rate, today=today)
+        effective_forecast_direction = live_forecast_direction(signal, rate, period) if signal else None
         effective_ratio = target_ratio * multiplier
         target_cover = D(abs(gross)) * D(effective_ratio)
         covered = D(abs(hedged))
@@ -1301,6 +1329,7 @@ def build_dashboard(
                 "forecast_multiplier": fN(multiplier, 4),
                 "forecast_reason": multiplier_reason,
                 "forecast_signal": signal,
+                "forecast_direction": effective_forecast_direction,
                 "recommended_amount": f2(recommended_amount),
                 "action": action,
                 "direction_unexpected": direction_is_unexpected(config, net),
@@ -2135,15 +2164,11 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             return
         if path in {"/api/export", "/api/workspace/export"}:
             state = validate_workspace_state(ensure_state())
-            self.send_json({
-                "ok": True,
-                "exported_at": now_iso(),
-                "data_file": str(STATE_FILE),
-                "state": state,
-                "workspace": state,
-                "metadata": state.get("metadata", {}),
-                "backups": list_backups(),
-            })
+            try:
+                ensure_workspace_export_fits(state)
+                self.send_json(workspace_export_payload(state, legacy=path == "/api/export"))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=413)
             return
         if path == "/api/backups":
             self.send_json({"backups": list_backups(), "data_file": str(STATE_FILE)})
@@ -2255,7 +2280,8 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     before_reset = state
                     # 方案是只读存档，"恢复样例"的语义是重置工作数据，
                     # 不该连历史快照一起抹掉——那是不可逆的，确认框也没提。
-                    reset_state = sample_state(keep_plans=state.get("plans", []))
+                    sample_today = parse_iso_date(body["today"], "today") if body.get("today") else None
+                    reset_state = sample_state(keep_plans=state.get("plans", []), today=sample_today)
                     save_state(reset_state, reason="reset-demo")
                     # 先写盘再记日志：反过来的话，写盘失败会在只追加的历史里
                     # 永久留下一条"重置过"的假记录。
@@ -2311,7 +2337,8 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     return
                 if self.path == "/api/workspace/sample":
                     before_sample = state
-                    next_state = sample_state(keep_plans=state.get("plans", []))
+                    sample_today = parse_iso_date(body["today"], "today") if body.get("today") else None
+                    next_state = sample_state(keep_plans=state.get("plans", []), today=sample_today)
                     save_state(next_state, reason="sample-workspace")
                     append_audit("reset", "workspace", None, before_sample, next_state)
                     self.send_json({"ok": True, "metadata": next_state["metadata"]})

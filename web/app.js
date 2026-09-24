@@ -162,12 +162,17 @@ function renderDashboard(data) {
   renderWorkspace(data.workspace || {});
   renderRateStatus(data);
   renderPortfolio(data.portfolio || {});
-  renderSuggestions(data.suggestions || []);
+  renderSuggestions(data.suggestions || [], data.rate_trial_reasons || []);
   renderNetExposure(data.net_exposures || []);
   renderExposureTable(data.exposures || []);
   renderHedgeTable(data.hedges || []);
   renderSettlementTable(data.settlements || []);
-  renderScenarioRows(data.scenario_rows || [], data.scenario_totals || {}, data.scenario_uniform);
+  renderScenarioRows(
+    data.scenario_rows || [],
+    data.scenario_totals || {},
+    data.scenario_uniform,
+    data.rate_trial_reasons || [],
+  );
   renderList("backtestRows", data.backtest || [], renderBacktest);
   renderPlanDrift(data.plan_drift || {});
   renderPlans(data.plans || []);
@@ -326,11 +331,14 @@ function trendLink(item) {
   `;
 }
 
-function renderSuggestions(items) {
+function renderSuggestions(items, rateTrialReasons = []) {
   const box = document.getElementById("suggestions");
   box.innerHTML = "";
   if (!items.length) {
-    box.innerHTML = '<div class="card">暂无建议。先添加敞口。</div>';
+    const reason = rateTrialReasons.length
+      ? `暂无可执行建议：${rateTrialReasons.map(escapeHtml).join("；")}。请先刷新实时汇率。`
+      : "暂无建议。先添加敞口。";
+    box.innerHTML = `<div class="card">${reason}</div>`;
     return;
   }
   items.forEach((item) => {
@@ -388,7 +396,7 @@ function renderForecastBlock(item) {
   const s = item.forecast_signal;
   if (!s) return "";
   const tier = s.tier || "reject";
-  const dir = s.direction || "flat";
+  const dir = item.forecast_direction || s.direction || "flat";
   const chips = [];
   chips.push(`<span class="chip dir-${dir}">${dirText(dir)}</span>`);
   if (s.mape !== null && s.mape !== undefined) {
@@ -523,11 +531,14 @@ function renderScenarioTotals(totals, legCount) {
   `;
 }
 
-function renderScenarioRows(entries, totals, uniform) {
+function renderScenarioRows(entries, totals, uniform, rateTrialReasons = []) {
   const box = document.getElementById("scenarioRows");
   box.innerHTML = "";
   if (!entries.length) {
-    box.innerHTML = '<div class="item">暂无敞口，因此没有预计损益场景。</div>';
+    const reason = rateTrialReasons.length
+      ? `暂无可执行情景测算：${rateTrialReasons.map(escapeHtml).join("；")}。请先刷新实时汇率。`
+      : "暂无敞口，因此没有预计损益场景。";
+    box.innerHTML = `<div class="item">${reason}</div>`;
     return;
   }
   // 先给组合层面的总账，再给逐个期间/币种的明细。
@@ -1203,7 +1214,10 @@ function bindSetupPanel() {
   });
   if (sample) sample.addEventListener("click", async () => {
     await runAction("正在加载样例...", async () => {
-      await api("/api/workspace/sample", { method: "POST", body: "{}" });
+      await api("/api/workspace/sample", {
+        method: "POST",
+        body: JSON.stringify({ today: today() }),
+      });
       afterWorkspaceReplaced();
       await loadDashboard();
       showStatus("样例数据已加载。");
@@ -1466,7 +1480,10 @@ function bindForms() {
   document.getElementById("resetDemoBtn").addEventListener("click", async () => {
     if (!window.confirm("恢复样例会覆盖当前敞口、锁汇、结算记录和配置参数；系统会先自动备份当前工作区。确认继续？")) return;
     await runAction("正在恢复样例...", async () => {
-      await api("/api/reset-demo", { method: "POST", body: "{}" });
+      await api("/api/reset-demo", {
+        method: "POST",
+        body: JSON.stringify({ today: today() }),
+      });
       afterWorkspaceReplaced();
       await loadDashboard();
       showStatus("样例数据已恢复");

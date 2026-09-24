@@ -277,6 +277,17 @@ class ForecastMultiplierTest(unittest.TestCase):
         self.assertEqual(mult, 1.0)
         self.assertIn("覆盖不到", reason)
 
+    def test_invalid_exact_period_rate_fails_closed(self):
+        signal = self._signal(final=7.4)
+        signal["forecast"] = [{"month": "2026-11", "rate": "not-a-number"}]
+
+        mult, reason = web_app.forecast_multiplier(
+            signal, net=1000, period="2026-11", live_spot=7.0, today=date(2026, 5, 20),
+        )
+
+        self.assertEqual(mult, 1.0)
+        self.assertIn("预测汇率无效", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -283,11 +283,25 @@ class HttpApiTest(unittest.TestCase):
 
         status, exported = request("GET", f"{self.base}/api/workspace/export")
         self.assertEqual(status, 200)
+        self.assertIn("workspace", exported)
+        self.assertNotIn("state", exported)
         self.assertGreater(len(json.dumps(exported).encode("utf-8")), 5 * 1024 * 1024)
 
         status, imported = request("POST", f"{self.base}/api/workspace/import", exported)
         self.assertEqual(status, 200)
         self.assertTrue(imported["ok"])
+
+    def test_sample_workspace_uses_browser_calendar_date(self):
+        status, _ = request(
+            "POST", f"{self.base}/api/workspace/sample", {"today": "2026-10-01"},
+        )
+        self.assertEqual(status, 200)
+
+        _, dashboard = request("GET", f"{self.base}/api/state")
+        due_dates = {row["due_date"] for row in dashboard["exposures"]}
+        settlement_dates = {row["due_date"] for row in dashboard["settlements"]}
+        self.assertIn("2027-01-31", due_dates)
+        self.assertIn("2026-09-30", settlement_dates)
 
     def test_mutating_api_rejects_cross_origin_and_non_json_requests(self):
         status, body = request("POST", f"{self.base}/api/exposures", {
