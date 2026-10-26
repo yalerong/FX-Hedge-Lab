@@ -3,6 +3,8 @@ __pycache__/
 data/tmp/
 data/fx_workspace.json
 data/rates_cache.json
+# 备份里是同一份业务数据的快照，和状态文件一样不能进仓库
+data/backups/
 data/events/events.csv
 
 # wrangler 本地部署缓存（含账号信息，不进仓库）

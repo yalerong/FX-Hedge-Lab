@@ -71,6 +71,8 @@ function formData(form) {
     "actual_amount",
     "rate_cache_hours",
     "risk_limit_cny",
+    "forecast_max_age_days",
+    "settlement_grace_days",
     "default_hedge_ratio",
     "optimistic_shift_pct",
     "pessimistic_shift_pct",
@@ -153,6 +155,7 @@ function renderDashboard(data) {
   renderWorkspace(data.workspace || {});
   renderRateStatus(data);
   renderPortfolio(data.portfolio || {});
+  renderForecastStatus(data);
   renderSuggestions(data.suggestions || []);
   renderNetExposure(data.net_exposures || []);
   renderExposureTable(data.exposures || []);
@@ -300,6 +303,23 @@ function renderRateStatus(data) {
     `汇率：${rateStatusText(rates.status)} · 更新于 ${fmtTime(rates.fetched_at)}`;
 }
 
+function renderForecastStatus(data) {
+  const box = document.getElementById("forecastStatus");
+  if (!box) return;
+  const signals = Object.keys(((data.forecast || {}).signals) || {});
+  if (!signals.length || !data.forecast_stale) {
+    box.innerHTML = "";
+    return;
+  }
+  // 停用原因里已经带"生成于 N 天前"，不要在外面再拼一遍
+  box.innerHTML = `
+    <p class="notice notice-warn">
+      预测信号已停用：${escapeHtml(data.forecast_stale_reason || "超过有效期")}。
+      所有建议按目标比例足额锁汇；重跑 <code>python -m forecast.pipeline</code> 后恢复。
+    </p>
+  `;
+}
+
 function renderSuggestions(items) {
   const box = document.getElementById("suggestions");
   box.innerHTML = "";
@@ -424,6 +444,7 @@ function fillHedgeFromSuggestion(item) {
   form.action.value = item.action;
   form.amount.value = item.recommended_amount;
   form.locked_rate.value = item.trade_rate || item.current_rate;
+  if (form.designated_period) form.designated_period.value = item.period;
   form.description.value = item.plain_text;
   form.scrollIntoView({ behavior: "smooth", block: "center" });
   showStatus("已按建议填入锁汇单，请确认后保存。");
@@ -478,14 +499,14 @@ function renderScenarioTotals(totals, legCount) {
   return `
     <div class="item total-item">
       <strong>全部敞口合计（${legCount} 组期间 × 币种）</strong>
-      <p class="meta">各币种损益已折成人民币，可直接相加；不同到期日按名义金额相加，未做贴现。${spread}</p>
+      <p class="meta">各币种损益已折成人民币，可直接相加；不同到期日按名义金额相加，未做贴现。套保损益含账上存量远期按情景重估，以及本次建议新增的那一笔。${spread}</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>场景</th>
               <th>未实现汇兑损益</th>
-              <th>套保损益</th>
+              <th>套保损益（存量+建议）</th>
               <th>合计预计损益</th>
             </tr>
           </thead>
@@ -525,9 +546,17 @@ function renderScenarioRows(entries, totals, uniform) {
     const title = item.has_recommendation
       ? `${escapeHtml(item.period)} ${escapeHtml(item.currency)} 推荐交易预计损益`
       : `${escapeHtml(item.period)} ${escapeHtml(item.currency)} 当前敞口预计损益`;
-    const note = item.has_recommendation
-      ? `建议金额 ${money(item.recommended_amount)}。`
-      : "无新增建议（已达目标套保比例），下表只反映剩余敞口本身的浮动损益。";
+    const noteParts = [];
+    const existing = Number(item.hedge_count || 0);
+    if (existing) {
+      noteParts.push(`已含存量 ${existing} 笔远期（${money(item.existing_hedge_notional)}）按情景重估`);
+    }
+    if (item.has_recommendation) {
+      noteParts.push(`建议新增 ${money(item.recommended_amount)}`);
+    } else {
+      noteParts.push("无新增建议（已达目标套保比例），下表是剩余敞口与存量远期的浮动损益");
+    }
+    const note = `${noteParts.join("；")}。`;
     div.innerHTML = `
       <strong>${title}</strong>
       <p class="meta">${note}科目：${bucketName(item.accounting_bucket)}。中性、乐观、悲观、自定义场景按配置的汇率涨跌幅计算。</p>
@@ -787,6 +816,17 @@ function renderHedgeTable(rows) {
   renderDetailTable("hedgeRows", "hedgeCount", rows, [
     { render: (row) => escapeHtml(row.trade_date) },
     { render: (row) => escapeHtml(row.due_date) },
+    {
+      render: (row) => {
+        const duePeriod = String(row.due_date || "").slice(0, 7);
+        const period = row.designated_period || duePeriod;
+        if (!period) return "—";
+        const cross = Boolean(row.designated_period && row.designated_period !== duePeriod);
+        return cross
+          ? `${escapeHtml(period)} <span class="warn-tag" title="交割日不在该期间，按手工指定的期间归集">跨月指定</span>`
+          : escapeHtml(period);
+      },
+    },
     { render: (row) => escapeHtml(row.currency) },
     {
       render: (row) => row.action === "sell_foreign"
@@ -1071,6 +1111,8 @@ function renderConfig(config) {
   form.rate_api_url.value = config.rate_api_url || "";
   form.rate_cache_hours.value = config.rate_cache_hours || 24;
   form.risk_limit_cny.value = config.risk_limit_cny ?? 200000;
+  form.forecast_max_age_days.value = config.forecast_max_age_days ?? 7;
+  form.settlement_grace_days.value = config.settlement_grace_days ?? 5;
   form.enterprise_type.value = config.enterprise_type || "comprehensive";
   for (const key of CONFIG_PERCENT_FIELDS) {
     form.elements[key].value = config[key] == null ? "" : Number(config[key]) * 100;

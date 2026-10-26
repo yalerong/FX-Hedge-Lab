@@ -353,6 +353,35 @@ class HttpApiTest(unittest.TestCase):
         self.assertEqual(len(created), count, "并发写丢了记录")
         self.assertEqual(len({row["id"] for row in created}), count, "id 撞了")
 
+    # ---------- 静态资源与导入 ----------
+
+    def test_web_path_traversal_is_404(self):
+        """`/web/../web_app.py` 以前直接返回源码。urllib 会折叠 `..`，
+        所以这里用 http.client 发原始请求行。"""
+        import http.client
+
+        for path in ("/web/../web_app.py", "/web/../data/fx_workspace.json"):
+            with self.subTest(path=path):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.server.server_address[1], timeout=10
+                )
+                connection.putrequest("GET", path)
+                connection.endheaders()
+                response = connection.getresponse()
+                body = response.read()
+                connection.close()
+                self.assertEqual(response.status, 404)
+                self.assertNotIn(b"def build_dashboard", body)
+
+    def test_empty_import_payload_is_rejected(self):
+        """`POST /api/import {}` 以前会把整个工作区静默清空。"""
+        _, before = request("GET", f"{self.base}/api/state")
+        status, data = request("POST", f"{self.base}/api/import", {})
+        self.assertEqual(status, 400)
+        self.assertIn("不是工作区导出格式", data["error"])
+        _, after = request("GET", f"{self.base}/api/state")
+        self.assertEqual(len(after["exposures"]), len(before["exposures"]))
+
 
 if __name__ == "__main__":
     unittest.main()

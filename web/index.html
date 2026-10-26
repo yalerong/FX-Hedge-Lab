@@ -119,6 +119,7 @@
             <p>建议金额 = 业务敞口 × 目标套保比例 × 预测折扣 − 已锁金额。目标比例来自配置（可按月份与币种单独覆盖），预测折扣只会调低比例，不会调高。</p>
           </div>
           <div id="planDrift"></div>
+          <div id="forecastStatus"></div>
           <div id="suggestions" class="cards"></div>
           <div class="plan-actions">
             <input id="planLabel" type="text" placeholder="方案名称（可留空）" maxlength="40" />
@@ -168,6 +169,9 @@
             </label>
             <label>锁汇金额 <input name="amount" type="number" min="0.01" step="0.01" required /></label>
             <label>锁定汇率 <input name="locked_rate" type="number" min="0.000001" step="0.000001" required /></label>
+            <label>对应期间 <input name="designated_period" type="month" />
+              <span class="field-hint">交割日跨月时填（如 3/31 的敞口、4/2 交割，填该年 03），留空按交割日所在月</span>
+            </label>
             <label>备注 <input name="description" placeholder="例如：银行远期结汇" /></label>
             <button type="submit">记录锁汇</button>
           </form>
@@ -209,6 +213,7 @@
                   <tr>
                     <th>交易日</th>
                     <th>到期日</th>
+                    <th>对应期间</th>
                     <th>币种</th>
                     <th>操作</th>
                     <th>金额</th>
@@ -343,6 +348,8 @@
           <form id="configForm" class="config-form">
             <label>汇率接口 <input name="rate_api_url" /></label>
             <label>缓存小时 <input name="rate_cache_hours" type="number" min="1" step="1" /></label>
+            <label>预测信号有效期（天） <input name="forecast_max_age_days" type="number" min="0" step="1" /></label>
+            <label>跨月归集容差（天） <input name="settlement_grace_days" type="number" min="0" max="31" step="1" /></label>
             <label>风险阈值 CNY（仅提示） <input name="risk_limit_cny" type="number" min="0" step="1000" /></label>
             <label>企业类型
               <select name="enterprise_type">

@@ -233,6 +233,12 @@ textarea {
   font-family: Consolas, "Courier New", monospace;
 }
 
+.field-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 input:focus,
 select:focus,
 textarea:focus,
@@ -296,7 +302,9 @@ button.danger-outline:hover {
   border: 1px solid var(--accent-line);
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--topbar-text);
+  /* 浅色主题下 --topbar-text 是近白色，配 accent-soft 底会看不见。
+     徽标自己带底，用正文色，深浅两套主题都能读。 */
+  color: var(--text);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;

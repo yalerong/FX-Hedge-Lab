@@ -80,7 +80,8 @@ class PlanSnapshotTest(unittest.TestCase):
         # 留着样例里那 50 万锁汇的话建议金额会归零、方案里就没有 USD 这行了
         self.state["hedges"] = []
         data = web_app.build_dashboard(
-            self.state, RATES, forecast_doc={"signals": signals}
+            self.state, RATES,
+            forecast_doc={"generated_at": web_app.now_iso(), "signals": signals},
         )
         plan = plans.freeze(data, None, "2026-05-12T00:00:00Z")
         usd = next(r for r in plan["rows"] if r["currency"] == "USD")
@@ -98,7 +99,8 @@ class PlanSnapshotTest(unittest.TestCase):
                            "n_test": 30, "direction_accuracy": 0.62}}
         self.state["hedges"] = []
         data = web_app.build_dashboard(
-            self.state, RATES, forecast_doc={"signals": signals}
+            self.state, RATES,
+            forecast_doc={"generated_at": web_app.now_iso(), "signals": signals},
         )
         plan = plans.freeze(data, None, "2026-05-12T00:00:00Z")
         result = plans.drift(plan, data["config"], RATES["pair_rates"], signals)

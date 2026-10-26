@@ -71,6 +71,15 @@ DEFAULT_CONFIG = {
     "forward_overrides": {},
     "monthly_average_rates": {},
     "confirmed_parameters": {},
+    # 预测信号的有效期：超过这么多天的信号不再影响建议（0 = 不设期限）。
+    # 一份 4 月生成、到 10 月结束的预测，到 9 月还在给 10 月的敞口打折，
+    # 那已经不是"预测"，是历史。
+    "forecast_max_age_days": 7,
+    # 远期交割日跨月时的容差：交割日落在月初这么多天内、且本月没有该币种
+    # 敞口时，算到上个月。T+2 和月末假日会把一笔对冲推到下个月，
+    # 不设容差就会两边各算一次，建议金额直接翻倍（实测 100 万敞口会建议
+    # 锁 80 万，而 50 万已经在账上了）。
+    "settlement_grace_days": 5,
     # 情景默认对所有币种同幅同向变动，等于假设币种间相关性为 1。
     # 对"净收美元 + 净付欧元"这种组合会天然对冲、把风险算小，
     # 要按币种分别设就写在这里：{"USD": {"optimistic": 0.03, ...}}
@@ -136,17 +145,6 @@ DEMO_STATE = {
 # **不做猜测性映射**——把 export_order 猜成"合同/订单套保"会悄悄改掉会计科目。
 EXPOSURE_CATEGORIES = ("balance_sheet", "cash_flow", "order_contract")
 DEFAULT_CATEGORY = "cash_flow"
-
-
-FALLBACK_PAIR_RATES = {
-    "USD": 7.15,
-    "EUR": 7.72,
-    "JPY": 0.049,
-    "HKD": 0.915,
-    "GBP": 9.05,
-    "AUD": 4.72,
-    "SGD": 5.31,
-}
 
 
 def utc_now() -> datetime:
@@ -408,6 +406,13 @@ def validate_config(payload: dict, base: dict | None = None, replace_maps: set[s
         raise ValueError("supported_currencies 不需要包含 CNY")
     config["rate_cache_hours"] = positive_number(config.get("rate_cache_hours"), "rate_cache_hours")
     config["risk_limit_cny"] = non_negative_number(config.get("risk_limit_cny", 0), "risk_limit_cny")
+    config["forecast_max_age_days"] = non_negative_number(
+        config.get("forecast_max_age_days", 7), "forecast_max_age_days"
+    )
+    grace = non_negative_number(config.get("settlement_grace_days", 5), "settlement_grace_days")
+    if grace > 31:
+        raise ValueError("settlement_grace_days 不能超过 31 天")
+    config["settlement_grace_days"] = grace
     ratio = non_negative_number(config.get("default_hedge_ratio", 0), "default_hedge_ratio")
     if ratio > 1:
         raise ValueError("default_hedge_ratio 必须在 0 到 1 之间")
@@ -717,14 +722,18 @@ def load_rates(config: dict, force: bool = False) -> dict:
             cache["status"] = "cached_after_refresh_error"
             cache["last_error"] = str(exc)
             return cache
+        # 没有缓存、接口又失败时，**不再用硬编码汇率兜底**。
+        # 以前这里塞 7.15 / 7.72 之类的数，页面照常出建议和人民币风险，
+        # 看上去一切正常——但那是拿一个假价格做的真决策。现在返回空报价，
+        # 下游按"汇率缺失"处理：不出建议、不估人民币风险、页面明确提示。
         cache = {
-            "source": "built-in fallback rates",
-            "source_url": "manual fallback",
+            "source": "无可用报价",
+            "source_url": None,
             "api_url": url,
             "fetched_at": now_iso(),
-            "status": "fallback",
+            "status": "unavailable",
             "last_error": str(exc),
-            "pair_rates": {currency: rate for currency, rate in FALLBACK_PAIR_RATES.items() if currency in currencies},
+            "pair_rates": {},
         }
         write_json(RATES_CACHE_FILE, cache)
         return cache
@@ -740,7 +749,11 @@ def load_forecast_signals() -> dict:
 
 
 def forecast_expected_move(signal: dict | None) -> float | None:
-    """预测期末相对当前汇率的变动幅度（绝对值）。"""
+    """预测期末相对当前汇率的变动幅度（绝对值）。
+
+    只在拿不到具体到期月份时兜底（老格式信号、没有逐月预测）。日常路径
+    应该用 `forecast_rate_for_period` 取该月自己的点位。
+    """
     if not signal:
         return None
     rows = signal.get("forecast") or []
@@ -755,6 +768,92 @@ def forecast_expected_move(signal: dict | None) -> float | None:
     if current == 0:
         return None
     return abs(final / current - 1)
+
+
+def forecast_months(signal: dict | None) -> list[str]:
+    return [
+        row["month"]
+        for row in ((signal or {}).get("forecast") or [])
+        if isinstance(row, dict) and row.get("month")
+    ]
+
+
+def forecast_rate_for_period(signal: dict | None, period: str | None) -> float | None:
+    """取该到期期间对应的预测点位。
+
+    优先精确匹配；序列里没有这一月时退回最近一个不晚于它的月份，
+    **不拿序列最后一个月顶替**——6 个月后的点位对 1 个月后的敞口没有发言权，
+    用它来砍套保比例，等于按一份不相干的预测做决策。
+    """
+    if not signal or not period:
+        return None
+    points: list[tuple[str, object]] = []
+    for row in signal.get("forecast") or []:
+        if not isinstance(row, dict):
+            continue
+        month, rate = row.get("month"), row.get("rate")
+        if month and rate is not None:
+            points.append((str(month), rate))
+    for month, rate in points:
+        if month == period:
+            try:
+                return float(rate)
+            except (TypeError, ValueError):
+                return None
+    earlier = [(month, rate) for month, rate in points if month <= period]
+    if not earlier:
+        return None
+    _, rate = max(earlier, key=lambda item: item[0])
+    try:
+        return float(rate)
+    except (TypeError, ValueError):
+        return None
+
+
+def months_ahead(signal: dict | None, period: str | None) -> int:
+    """信号当前月到该期间隔了几个月，最少 1。"""
+    if not signal or not period:
+        return 1
+    start = str(signal.get("current_month") or "")
+    if not PERIOD_RE.match(start) or not PERIOD_RE.match(str(period)):
+        return 1
+    try:
+        start_year, start_month = int(start[:4]), int(start[5:7])
+        end_year, end_month = int(period[:4]), int(period[5:7])
+    except (TypeError, ValueError):
+        return 1
+    return max(1, (end_year - start_year) * 12 + (end_month - start_month))
+
+
+def forecast_age_days(forecast_doc: dict | None) -> float | None:
+    stamp = (forecast_doc or {}).get("generated_at")
+    if not stamp:
+        return None
+    try:
+        generated = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if generated.tzinfo is None:
+        generated = generated.replace(tzinfo=timezone.utc)
+    return max(0.0, (utc_now() - generated).total_seconds() / 86400)
+
+
+def forecast_is_stale(forecast_doc: dict | None, config: dict) -> tuple[bool, str | None]:
+    """信号是否过了有效期。返回 (stale, reason)。
+
+    没有信号不算过期——那不是"旧的"，是"没有"。有信号但没有生成时间时
+    按过期处理：宁可足额锁，也不拿一份来历不明的预测去少锁。这条和其余
+    几道闸门一样，只降不升。
+    """
+    if not (forecast_doc or {}).get("signals"):
+        return False, None
+    age = forecast_age_days(forecast_doc)
+    if age is None:
+        return True, "预测信号缺少生成时间，无法判断新旧，按过期处理"
+    limit = float(config.get("forecast_max_age_days", 7) or 0)
+    if limit > 0 and age > limit:
+        return True, f"预测信号生成于 {age:.1f} 天前，超过 {limit:g} 天有效期，不再影响建议"
+    return False, None
 
 
 def signal_covers_period(signal: dict | None, period: str | None) -> bool:
@@ -778,23 +877,54 @@ def forecast_multiplier(
     if not signal:
         return 1.0, None
     if not signal_covers_period(signal, period):
-        months = [row.get("month") for row in (signal.get("forecast") or []) if row.get("month")]
+        months = forecast_months(signal)
         span = f"{min(months)}~{max(months)}" if months else "空"
         return 1.0, f"预测区间 {span} 覆盖不到 {period}，这段时间模型说不上话，按目标比例锁汇"
     tier = signal.get("tier")
-    direction = signal.get("direction")
-    unfavorable = (direction == "down") if net > 0 else (direction == "up")
     if tier not in ("support", "caution"):
         return 1.0, "模型质量不达标，忽略预测方向，按目标比例锁汇"
+
+    # 方向和幅度都取**该到期期间自己**的点位。以前一律用序列最后一个月：
+    # 11 月到期的敞口会被 4 月的 +11% 砍掉一半额度，而信号对 11 月的判断
+    # 其实是"不动"。没有逐月序列或没传期间时才退回整体方向。
+    move: float | None = None
+    direction = signal.get("direction")
+    horizon = 1
+    if period and signal.get("forecast"):
+        rate = forecast_rate_for_period(signal, period)
+        try:
+            current = float(signal.get("current")) if signal.get("current") is not None else None
+        except (TypeError, ValueError):
+            current = None
+        if rate is not None and current:
+            move = rate / current - 1
+            horizon = months_ahead(signal, period)
+            direction = "up" if move > 0 else "down" if move < 0 else "flat"
+    if move is None:
+        move = forecast_expected_move(signal)
+        if direction not in ("up", "down", "flat"):
+            direction = "flat" if not move else "up"
+    if direction == "flat":
+        return 1.0, "预测该期间汇率持平，不构成少锁的理由，按目标比例锁汇"
+
+    unfavorable = (direction == "down") if net > 0 else (direction == "up")
     if unfavorable:
         if tier == "support":
             return 1.0, "模型质量达标，预测对你不利，按目标比例锁汇"
         return 1.0, "模型质量一般，预测不利，按目标比例锁汇"
-    # 信噪比闸门：预测幅度没超过模型自身误差，就不足以支撑少锁
-    move = forecast_expected_move(signal)
+    # 信噪比闸门：预测幅度没超过模型自身误差，就不足以支撑少锁。
+    # 单月 MAPE 按 √h 放大到该期间——拿 1 个月的误差去卡 6 个月的变动，
+    # 等于给远月发一张免费通行证。
     mape = signal.get("mape")
-    if move is not None and mape is not None and move <= mape:
-        return 1.0, f"预测有利但幅度 {move:.1%} 未超过模型误差 {mape:.1%}，不足以支撑少锁，按目标比例锁汇"
+    if move is not None and mape is not None:
+        threshold = float(mape) * math.sqrt(horizon)
+        if abs(move) <= threshold:
+            if horizon > 1:
+                return 1.0, (
+                    f"预测有利但幅度 {abs(move):.1%} 未超过 {horizon} 个月模型误差 "
+                    f"{threshold:.1%}，不足以支撑少锁，按目标比例锁汇"
+                )
+            return 1.0, f"预测有利但幅度 {abs(move):.1%} 未超过模型误差 {threshold:.1%}，不足以支撑少锁，按目标比例锁汇"
     if tier == "support":
         return 0.5, "模型质量达标，预测对你有利，降到目标比例的 50%"
     return 0.7, "模型质量一般，预测有利，降到目标比例的 70%"
@@ -820,6 +950,72 @@ def signed_hedge(row: dict) -> float:
 
 def period_from_date(value: str) -> str:
     return value[:7] if value else "未填日期"
+
+
+def previous_period(period: str) -> str | None:
+    if not PERIOD_RE.match(str(period)):
+        return None
+    year, month = int(period[:4]), int(period[5:7])
+    if month == 1:
+        return f"{year - 1}-12"
+    return f"{year}-{month - 1:02d}"
+
+
+def hedge_period(row: dict, exposure_keys=None, grace_days: int = 0) -> str:
+    """这笔锁汇算到哪个期间。
+
+    优先级：
+      1. 手工指定的 `designated_period`——远期交割日跨月时，账上归属由人定；
+      2. 交割日所在月；
+      3. 交割日落在月初 `grace_days` 天内、本月又没有该币种敞口时，算到上个月。
+
+    第三条是 T+2 和月末假日的常见情形：3/31 的敞口、4/2 交割，不归到 3 月
+    就会变成"3 月没锁、4 月多了一笔空头"，对同一笔敞口再建议锁一次，
+    100 万的敞口会被建议锁到 130 万。
+    """
+    designated = str(row.get("designated_period") or "")
+    if PERIOD_RE.match(designated):
+        return designated
+    period = period_from_date(str(row.get("due_date") or ""))
+    if not PERIOD_RE.match(period) or grace_days <= 0 or not exposure_keys:
+        return period
+    try:
+        day = int(str(row.get("due_date"))[8:10])
+    except (TypeError, ValueError):
+        return period
+    prev = previous_period(period)
+    currency = str(row.get("currency") or "").upper()
+    if (
+        day <= grace_days
+        and prev
+        and (prev, currency) in exposure_keys
+        and (period, currency) not in exposure_keys
+    ):
+        return prev
+    return period
+
+
+def covered_notional(gross: float, hedged: float) -> float:
+    """方向相反、且不超过敞口本身的锁汇量才算覆盖。
+
+    同向持仓（收汇敞口 + 买入外币）是加仓，一分钱覆盖都不算；超额部分也只
+    算到敞口那么多。驾驶舱一直这么算，建议金额以前却用 abs(hedged)——同一组
+    数据两个口径：100 万收汇配 20 万买入，驾驶舱说覆盖 0、建议说已锁 20 万，
+    于是只建议锁 60 万，少锁 25%。
+    """
+    if gross * hedged >= 0:
+        return 0.0
+    return min(abs(hedged), abs(gross))
+
+
+def aggregate_hedges(
+    hedges: list[dict], exposure_keys, grace_days: int
+) -> dict[tuple[str, str], float]:
+    totals: dict[tuple[str, str], float] = defaultdict(float)
+    for row in hedges:
+        period = hedge_period(row, exposure_keys, grace_days)
+        totals[(period, str(row.get("currency") or "").upper())] += signed_hedge(row)
+    return totals
 
 
 def aggregate_rows(rows: list[dict], sign_fn) -> dict[tuple[str, str], float]:
@@ -991,21 +1187,43 @@ def signed_recommendation(action: str, amount: float) -> float:
 def scenario_projection(
     period: str,
     currency: str,
-    net: float,
+    gross: float,
+    hedges: list[dict],
     recommended: dict,
     current: float,
     scenario_rates: dict[str, dict[str, float]],
 ) -> dict[str, dict]:
+    """一个（期间 × 币种）在四个情景下的损益。
+
+    **存量远期也要按情景重估。** 以前套保腿只算"建议新增"那一笔，账上已经
+    锁掉的 50 万美元在整张表里不存在——100 万收汇 + 50 万远期，美元跌 3%
+    时报 -6.4 万，真实经济损益是 -15.65 万，差 9.2 万。CFO 问"跌 3% 我们
+    亏多少"，这张表必须答的是整个账簿，不是一笔还没做的交易。
+
+    口径是**经济损益**（不是会计损益）：
+        业务敞口 × (情景价 - 即期) + Σ 每笔远期签署方向 × (情景价 - 锁定价)
+    中性情景因此等于存量远期的远期点（carry），不再恒等于 0。
+    """
     rows = {}
     for name, rates in scenario_rates.items():
         scenario_rate = float(rates.get(currency, current))
         # 这几个数会出现在报表上、也是对账口径，所以用 Decimal 算，
         # 见 money.py 里的范围说明。
         move = D(scenario_rate) - D(current)
-        exposure_pnl = D(net) * move
-        hedge_pnl = D(signed_recommendation(recommended["action"], recommended["recommended_amount"])) * (
-            D(scenario_rate) - D(recommended["trade_rate"])
-        )
+        exposure_pnl = D(gross) * move
+        hedge_pnl = D(0)
+        for hedge in hedges:
+            try:
+                locked_rate = float(hedge.get("locked_rate", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if locked_rate <= 0:
+                continue
+            hedge_pnl += D(signed_hedge(hedge)) * (D(scenario_rate) - D(locked_rate))
+        if recommended.get("recommended_amount"):
+            hedge_pnl += D(signed_recommendation(recommended["action"], recommended["recommended_amount"])) * (
+                D(scenario_rate) - D(recommended["trade_rate"])
+            )
         rows[name] = {
             "period": period,
             "currency": currency,
@@ -1030,10 +1248,17 @@ def build_dashboard(
     config = merged_config(state)
     if forecast_doc is None:
         forecast_doc = load_forecast_signals()
-    forecast_signals = forecast_doc.get("signals", {}) if forecast_doc else {}
+    forecast_stale, forecast_stale_reason = forecast_is_stale(forecast_doc, config)
+    forecast_signals = forecast_doc.get("signals", {}) if forecast_doc and not forecast_stale else {}
 
     exposure_totals = aggregate_rows(exposures, signed_exposure)
-    hedge_totals = aggregate_rows(hedges, signed_hedge)
+    exposure_keys = set(exposure_totals)
+    grace_days = int(float(config.get("settlement_grace_days", 0) or 0))
+    hedge_totals = aggregate_hedges(hedges, exposure_keys, grace_days)
+    hedges_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for hedge in hedges:
+        key = (hedge_period(hedge, exposure_keys, grace_days), str(hedge.get("currency") or "").upper())
+        hedges_by_key[key].append(hedge)
     keys = sorted(set(exposure_totals) | set(hedge_totals))
 
     net_rows = []
@@ -1086,18 +1311,20 @@ def build_dashboard(
         multiplier, multiplier_reason = forecast_multiplier(signal, net, period)
         effective_ratio = target_ratio * multiplier
         target_cover = D(abs(gross)) * D(effective_ratio)
-        covered = D(abs(hedged))
+        # 只用方向相反的持仓、且不超过敞口本身——和驾驶舱同一口径
+        covered = D(covered_notional(gross, hedged))
         recommended_amount = float(max(D(0), target_cover - covered))
         action = action_for(config, net)
         bucket = accounting_bucket(category, now_iso()[:10], due_date)
-        # 远期结汇不是按即期价成交的，交易价要用远期价
+        existing_hedges = hedges_by_key.get((period, currency), [])
 
-        # 情景损益对每一行净敞口都算：建议金额为 0 时套保腿为 0，
-        # 但敞口本身的浮动损益依然存在，不能整块消失。
+        # 情景损益对每一行都算：套保腿包含账上存量远期和这次建议新增的，
+        # 建议金额为 0 时只剩存量重估，但敞口本身的浮动损益依然存在。
         projection = scenario_projection(
             period,
             currency,
-            net,
+            gross,
+            existing_hedges,
             {
                 "action": action,
                 "recommended_amount": recommended_amount,
@@ -1107,13 +1334,18 @@ def build_dashboard(
             rate,
             scenario_rates,
         )
-        if abs(net) > 0 or recommended_amount > 0:
+        # 净敞口为 0 也可能有存量远期：全部锁掉时业务敞口和冲销腿相互抵消，
+        # 但远期本身的市值还在。只看 abs(net) 会把整个头寸从情景表里删掉。
+        if abs(net) > 0 or recommended_amount > 0 or existing_hedges:
             scenario_summary[f"{period}:{currency}"] = projection
             scenario_rows.append(
                 {
                     "period": period,
                     "currency": currency,
                     "net_exposure": f2(net),
+                    "business_exposure": f2(gross),
+                    "hedge_count": len(existing_hedges),
+                    "existing_hedge_notional": f2(sum(abs(float(h.get("amount", 0) or 0)) for h in existing_hedges)),
                     "recommended_amount": f2(recommended_amount),
                     "has_recommendation": recommended_amount > 0,
                     "accounting_bucket": bucket,
@@ -1191,6 +1423,10 @@ def build_dashboard(
         "plans": plan_list[-10:][::-1],
         "plan_drift": plan_drift,
         "forecast": forecast_doc,
+        "forecast_stale": forecast_stale,
+        "forecast_stale_reason": forecast_stale_reason,
+        "forecast_age_days": forecast_age_days(forecast_doc),
+        "settlement_grace_days": grace_days,
         "plain_language": build_plain_language(
             net_rows, suggestions, backtest_rows, rates_cache, scenario_totals
         ),
@@ -1379,10 +1615,13 @@ def build_backtest(
         if row.get("actual_amount") is not None
     }
     exposure_totals = aggregate_rows(exposures, signed_exposure)
-    hedge_totals = aggregate_rows(hedges, signed_hedge)
+    exposure_keys = set(exposure_totals)
+    grace_days = int(float(merged_config(state or {}).get("settlement_grace_days", 0) or 0))
+    hedge_totals = aggregate_hedges(hedges, exposure_keys, grace_days)
     locked_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for hedge in hedges:
-        locked_by_key[(period_from_date(hedge.get("due_date", "")), hedge.get("currency", "").upper())].append(hedge)
+        period = hedge_period(hedge, exposure_keys, grace_days)
+        locked_by_key[(period, str(hedge.get("currency") or "").upper())].append(hedge)
 
     rows = []
     for key in sorted(set(exposure_totals) | set(hedge_totals) | set(actual_by_key)):
@@ -1688,7 +1927,7 @@ CSV_FIELDS = {
     ],
     "hedges": [
         "id", "created_at", "trade_date", "due_date", "currency", "action", "amount",
-        "locked_rate", "description",
+        "locked_rate", "designated_period", "description",
     ],
     "settlements": [
         "id", "created_at", "due_date", "currency", "actual_rate", "actual_amount", "description",
@@ -1908,6 +2147,42 @@ def parse_collection_xlsx(collection: str, data_b64: str, config: dict) -> list[
     return parse_collection_csv(collection, out.getvalue(), config)
 
 
+def imported_workspace_from_body(body: dict) -> dict:
+    """把导入请求体解析成工作区。
+
+    校验器只会"补默认值"，不会"拒绝空对象"：以前传 `{}` 也能通过，
+    于是 `POST /api/import {}` 会把整个工作区静默清空并返回 200。
+    导入必须长得像一份导出——至少要有 metadata 和 config。
+    """
+    raw = body.get("workspace", body.get("state", body))
+    if (
+        not isinstance(raw, dict)
+        or not isinstance(raw.get("metadata"), dict)
+        or not isinstance(raw.get("config"), dict)
+    ):
+        raise ValueError("导入内容不是工作区导出格式（缺少 metadata/config）")
+    return validate_workspace_state(raw)
+
+
+def resolve_web_path(raw_path: str) -> Path | None:
+    """把 `/web/...` 映射到 `web/` 目录内，越界一律拒绝。
+
+    以前是 `ROOT / raw.lstrip("/")`，浏览器会折叠 `..`，但原始 HTTP 请求
+    不会：`GET /web/../web_app.py` 直接返回源码，`/web/../data/fx_workspace.json`
+    返回全部敞口和锁汇记录。绑 127.0.0.1 时危害有限，`--host 0.0.0.0`
+    就是事故。真实路径判断用 `is_relative_to`，不是字符串前缀比较
+    （`web2/` 会被前缀比较放过）。
+    """
+    try:
+        candidate = (ROOT / raw_path.lstrip("/")).resolve()
+        root = WEB_ROOT.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
 class FxRiskHandler(BaseHTTPRequestHandler):
     server_version = "FxRiskLocal/1.0"
 
@@ -1918,7 +2193,11 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_ROOT / "index.html")
             return
         if path.startswith("/web/"):
-            self.serve_file(ROOT / path.lstrip("/"))
+            target = resolve_web_path(path)
+            if target is None:
+                self.send_error(404)
+                return
+            self.serve_file(target)
             return
         if path == "/api/state":
             state = ensure_state()
@@ -2065,7 +2344,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True})
                     return
                 if self.path in {"/api/import", "/api/workspace/import"}:
-                    imported = validate_workspace_state(body.get("workspace", body.get("state", body)))
+                    imported = imported_workspace_from_body(body)
                     before_import = state
                     save_state(imported, reason="import-workspace")
                     append_audit("import", "workspace", None, before_import,
@@ -2312,6 +2591,13 @@ def validate_hedge(row: dict, config: dict | None = None) -> None:
         raise ValueError("锁汇方向必须是 buy_foreign 或 sell_foreign")
     row["amount"] = positive_number(row["amount"], "amount")
     row["locked_rate"] = positive_number(row["locked_rate"], "locked_rate")
+    # 交割日跨月时用它指定归属期间（例如 3/31 的敞口、4/2 交割的远期）。
+    # 留空则按交割日所在月、再按 settlement_grace_days 容差归集。
+    designated = row.get("designated_period")
+    if designated in (None, ""):
+        row.pop("designated_period", None)
+    else:
+        row["designated_period"] = validate_period(designated, "designated_period")
 
 
 def validate_settlement(row: dict, config: dict | None = None) -> None:
@@ -2328,13 +2614,13 @@ def validate_settlement(row: dict, config: dict | None = None) -> None:
     if raw_amount is None or raw_amount == "":
         row.pop("actual_amount", None)
         return
+    # 走 non_negative_number：它同时拒掉 NaN/Infinity。以前只判 < 0，
+    # 而 NaN < 0 是 False——一个 "nan" 能落盘成裸 NaN，Python 读得回来，
+    # 浏览器 JSON.parse 直接抛错，整个面板永久打不开。
     try:
-        actual_amount = float(raw_amount)
-    except (TypeError, ValueError):
-        raise ValueError("actual_amount 必须是数字") from None
-    if actual_amount < 0:
-        raise ValueError("actual_amount 不能为负")
-    row["actual_amount"] = actual_amount
+        row["actual_amount"] = non_negative_number(raw_amount, "actual_amount")
+    except ValueError:
+        raise ValueError("actual_amount 必须是非负有限数字") from None
 
 
 class FxRiskServer(ThreadingHTTPServer):

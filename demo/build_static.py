@@ -192,7 +192,7 @@ SHIM = """<script>
     var collection = new URL(path, window.location.href).searchParams.get("collection") || "exposures";
     var specs = {
       exposures: { fields: ["id", "created_at", "due_date", "currency", "amount", "direction", "probability", "booked", "category", "description"], rows: BAKED.exposures },
-      hedges: { fields: ["id", "created_at", "trade_date", "due_date", "currency", "action", "amount", "locked_rate", "description"], rows: BAKED.hedges },
+      hedges: { fields: ["id", "created_at", "trade_date", "due_date", "currency", "action", "amount", "locked_rate", "designated_period", "description"], rows: BAKED.hedges },
       settlements: { fields: ["id", "created_at", "due_date", "currency", "actual_rate", "actual_amount", "description"], rows: BAKED.settlements },
     };
     var spec = specs[collection];

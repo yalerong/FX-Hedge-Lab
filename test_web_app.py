@@ -142,10 +142,10 @@ class WebAppLogicTest(unittest.TestCase):
         rows = dashboard["scenario_rows"]
 
         self.assertEqual(set(totals), {"neutral", "optimistic", "pessimistic", "custom"})
-        # DEMO_STATE 的期间都在过去，远期退回即期，所以中性场景恰好是 0。
-        # 这条以前写成无条件断言，其实是靠"跑测试的那天已经过了 2026-06"才成立的，
-        # 而且和 README 里"中性不再恒等于 0"自相矛盾。见下面那条未来期间的测试。
-        self.assertEqual(totals["neutral"]["total_projected_gain_loss"], 0)
+        # 中性场景现在包含**存量远期**的远期点：样例里那 50 万美元锁在 7.18，
+        # 即期 7.2，按 7.2 重估就是 -1 万。以前套保腿只算"建议新增"，
+        # 账上已锁的那笔在整张情景表里不存在，中性才恰好是 0。
+        self.assertEqual(totals["neutral"]["total_projected_gain_loss"], -10000)
 
         for name in totals:
             expected_exposure = sum(
@@ -167,10 +167,13 @@ class WebAppLogicTest(unittest.TestCase):
                 sum(totals[name]["by_bucket"].values()), totals[name]["hedge_pnl"]
             )
 
-        # 乐观与悲观对称，合计应互为相反数
+        # 存量远期让整张表不再是"乐观 = -悲观"：锁在 7.18 的 50 万美元在
+        # 上下两个情景里的远期点不对称。正确的不变量是线性：
+        # 合计对情景价是线性的，所以 乐观 + 悲观 = 2 × 中性。
         self.assertAlmostEqual(
-            totals["optimistic"]["total_projected_gain_loss"],
-            -totals["pessimistic"]["total_projected_gain_loss"],
+            totals["optimistic"]["total_projected_gain_loss"]
+            + totals["pessimistic"]["total_projected_gain_loss"],
+            2 * totals["neutral"]["total_projected_gain_loss"],
             places=2,
         )
 
