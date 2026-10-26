@@ -297,6 +297,21 @@ h3.subhead {
   margin: 3px 0;
 }
 
+.button-link {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--accent-dark);
+}
+
 .corr-table {
   width: auto;
 }

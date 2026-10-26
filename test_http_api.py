@@ -382,6 +382,16 @@ class HttpApiTest(unittest.TestCase):
         _, after = request("GET", f"{self.base}/api/state")
         self.assertEqual(len(after["exposures"]), len(before["exposures"]))
 
+    def test_accounting_report_is_a_printable_html_attachment(self):
+        url = f"{self.base}/api/accounting/report"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            body = response.read().decode("utf-8")
+            self.assertEqual(response.status, 200)
+            self.assertIn("text/html", response.headers.get("Content-Type"))
+            self.assertIn("attachment", response.headers.get("Content-Disposition"))
+        self.assertIn("套期关系与有效性测试文档", body)
+        self.assertIn("有效性测试", body)
+
 
 if __name__ == "__main__":
     unittest.main()

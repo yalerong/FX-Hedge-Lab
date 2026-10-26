@@ -27,6 +27,8 @@ import math
 from datetime import date
 from statistics import NormalDist
 
+import history
+
 TRADING_DAYS = 252
 
 # 期限梯度：按到期月份距今天数分桶。标签只给前端展示用。
@@ -253,6 +255,7 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
     matrix, unconfigured_pairs, configured = correlation_matrix(config, all_currencies)
 
     sigma_net, contributions, vol_notes = _sigma(net_weights, config, matrix, currencies) if currencies else (0.0, {}, [])
+    historical = history.historical_sim(net_weights, config, confidence, horizon)
     sigma_gross = 0.0
     if gross_currencies:
         sigma_gross, _, _ = _sigma(gross_weights, config, matrix, gross_currencies)
@@ -273,6 +276,7 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
                 "currency": currency,
                 "net_cny": round(net_weights[currency], 2),
                 "vol": round(vol_for(config, currency)[0], 4),
+                "historical_vol": historical.get("vols", {}).get(currency),
                 "contribution_cny": round(contribution, 2),
                 "contribution_pct": (contribution / sigma_net) if sigma_net else 0.0,
             }
@@ -291,6 +295,13 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
     if overdue:
         notes.append("已逾期但未结算的敞口仍计入 VaR；请到「到期与回测」登记实际结果")
     notes.append("VaR 只覆盖汇率风险；不含利率、流动性、对手方与基差风险")
+    if historical.get("available"):
+        notes.append(
+            f"历史模拟 VaR {historical['var_cny']:,.0f} CNY（{historical['days']} 个交易日）；"
+            "与参数法的差异来自尾部形状与相关性，不是哪一个更'对'。"
+        )
+    else:
+        notes.append(f"历史模拟不可用：{historical.get('reason', '缺历史数据')}")
 
     return {
         "asof": today.isoformat(),
@@ -309,6 +320,7 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
         "limit_utilization": round(var_net / limit, 4) if limit > 0 else None,
         "over_limit": bool(limit > 0 and var_net > limit),
         "positions": positions,
+        "historical": historical,
         "correlations": {
             "currencies": all_currencies,
             "matrix": [[round(value, 4) for value in row] for row in matrix],

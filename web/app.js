@@ -77,6 +77,8 @@ function formData(form) {
     "var_limit_cny",
     "default_spread_bp",
     "quote_max_age_hours",
+    "historical_window_days",
+    "oci_opening_cny",
     "forecast_max_age_days",
     "settlement_grace_days",
     "default_hedge_ratio",
@@ -1188,6 +1190,11 @@ function renderConfig(config) {
   form.var_limit_cny.value = config.var_limit_cny ?? 0;
   form.default_spread_bp.value = config.default_spread_bp ?? 10;
   form.quote_max_age_hours.value = config.quote_max_age_hours ?? 24;
+  form.entity_name.value = config.entity_name || "";
+  form.prepared_by.value = config.prepared_by || "";
+  form.hedge_standard.value = config.hedge_standard || "CAS24";
+  form.oci_opening_cny.value = config.oci_opening_cny ?? 0;
+  form.historical_window_days.value = config.historical_window_days ?? 500;
   form.enterprise_type.value = config.enterprise_type || "comprehensive";
   for (const key of CONFIG_PERCENT_FIELDS) {
     form.elements[key].value = config[key] == null ? "" : Number(config[key]) * 100;
@@ -1578,6 +1585,14 @@ function renderRisk(risk) {
     return;
   }
   const confidence = Math.round(Number(risk.confidence || 0.99) * 100);
+  const historical = risk.historical || {};
+  const historicalCard = historical.available
+    ? kpiCard(
+      `历史模拟 VaR（${confidence}% / ${risk.horizon_days} 天）`,
+      `${money(historical.var_cny)} CNY`,
+      `${historical.observations} 个观测 · ${historical.start} ~ ${historical.end}`,
+    )
+    : kpiCard("历史模拟 VaR", "不可用", historical.reason || "缺本地历史数据", "warn");
   cards.innerHTML = [
     kpiCard(
       `VaR（${confidence}% / ${risk.horizon_days} 天）`,
@@ -1585,7 +1600,8 @@ function renderRisk(risk) {
       `组合 σ ${money(risk.sigma_cny)} CNY`,
       risk.over_limit ? "warn" : "",
     ),
-    kpiCard("预期尾部损失 ES", `${money(risk.es_cny)} CNY`, "超过 VaR 那部分的平均亏损"),
+    historicalCard,
+    kpiCard("预期尾部损失 ES", `${money(risk.es_cny)} CNY`, "参数法尾部平均亏损"),
     kpiCard("对冲降低的 VaR", `${money(risk.hedge_benefit_cny)} CNY`, `未对冲 VaR ${money(risk.var_gross_cny)}`),
     kpiCard(
       "限额使用率",
@@ -1620,6 +1636,7 @@ function renderRisk(risk) {
       <td>${escapeHtml(row.currency)}</td>
       <td class="num">${money(row.net_cny)}</td>
       <td class="num">${(Number(row.vol) * 100).toFixed(1)}%</td>
+      <td class="num">${row.historical_vol == null ? "—" : (Number(row.historical_vol) * 100).toFixed(1) + "%"}</td>
       <td class="num">${money(row.contribution_cny)}</td>
       <td class="num">${(Number(row.contribution_pct) * 100).toFixed(1)}%</td>
     </tr>

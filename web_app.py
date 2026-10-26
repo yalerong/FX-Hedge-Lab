@@ -29,6 +29,7 @@ from money import D, f2, f as fN, q
 import benchmarks
 import forwards
 import hedge_accounting
+import hedge_report
 import plans
 import quotes
 import risk
@@ -103,6 +104,13 @@ DEFAULT_CONFIG = {
     "spot_overrides": {},
     "quote_overrides": {},
     "quote_max_age_hours": 24,
+    # 历史模拟：窗口按交易日计，不足 250 个样本时不给结果。
+    "historical_window_days": 500,
+    # 套期关系文档的抬头信息（导出 HTML 时用）。
+    "entity_name": "",
+    "prepared_by": "",
+    "hedge_standard": "CAS24",
+    "oci_opening_cny": 0,
 }
 
 
@@ -611,6 +619,22 @@ def validate_config(payload: dict, base: dict | None = None, replace_maps: set[s
     config["quote_max_age_hours"] = non_negative_number(
         config.get("quote_max_age_hours", 24), "quote_max_age_hours"
     )
+    window = positive_number(config.get("historical_window_days", 500), "historical_window_days")
+    if not 60 <= window <= 2000:
+        raise ValueError("historical_window_days 必须在 60 到 2000 之间")
+    config["historical_window_days"] = int(window)
+    for key in ("entity_name", "prepared_by"):
+        value = config.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串")
+        config[key] = value.strip()[:100]
+    standard = config.get("hedge_standard", "CAS24")
+    if standard not in {"CAS24", "IFRS9", "ASC815"}:
+        raise ValueError("hedge_standard 必须是 CAS24 / IFRS9 / ASC815")
+    config["hedge_standard"] = standard
+    config["oci_opening_cny"] = finite_number(config.get("oci_opening_cny", 0), "oci_opening_cny")
 
     for key, value in config["confirmed_parameters"].items():
         if not isinstance(key, str) or not isinstance(value, bool):
@@ -1986,6 +2010,24 @@ def build_plain_language(
     return lines
 
 
+def discard_request_body(handler: BaseHTTPRequestHandler) -> None:
+    """拒绝请求前把 body 读掉。
+
+    服务端在 403/415 时直接回包、不读 body，客户端可能还在写；
+    内核随后发 RST，调用方看到的是 ConnectionResetError 而不是错误码。
+    测试里偶发的连接复位就是这个原因。先读干净再回包。
+    """
+    try:
+        length = int(handler.headers.get("Content-Length", "0") or 0)
+    except (TypeError, ValueError):
+        length = 0
+    if 0 < length <= 10_000_000:
+        try:
+            handler.rfile.read(length)
+        except OSError:
+            pass
+
+
 def parse_body(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length", "0"))
     if length <= 0:
@@ -2409,6 +2451,21 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             rates = load_rates(merged_config(state))
             self.send_json(build_dashboard(state, rates))
             return
+        if path == "/api/accounting/report":
+            # 自包含 HTML：内联 CSS、无脚本、无外部资源，浏览器里直接打印为 PDF。
+            # 这是"文档"，不是数据接口，所以下载而不是渲染 JSON。
+            state = ensure_state()
+            config = merged_config(state)
+            rates = load_rates(config)
+            report = hedge_report.render_html(
+                build_dashboard(state, rates), config, dt_date.today(), generated_at=now_iso()
+            )
+            self.send_binary(
+                report.encode("utf-8"),
+                "text/html; charset=utf-8",
+                f"hedge-accounting-{dt_date.today().isoformat()}.html",
+            )
+            return
         if path in {"/api/export", "/api/workspace/export"}:
             state = validate_workspace_state(ensure_state())
             self.send_json({
@@ -2452,6 +2509,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
+                discard_request_body(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             body = parse_body(self)
@@ -2623,6 +2681,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
             blocked = check_mutation_headers(self)
             if blocked:
                 status, message = blocked
+                discard_request_body(self)
                 self.send_json({"ok": False, "error": message}, status=status)
                 return
             parts = self.path.strip("/").split("/")
@@ -2662,6 +2721,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
         blocked = check_mutation_headers(self)
         if blocked:
             status, message = blocked
+            discard_request_body(self)
             self.send_json({"ok": False, "error": message}, status=status)
             return
         parts = self.path.strip("/").split("/")

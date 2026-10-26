@@ -314,6 +314,8 @@ BANNER_CSS = """
 .demo-banner span { flex: 1 1 420px; color: var(--muted); }
 .demo-banner a { color: var(--accent-dark); font-weight: 600; }
 .demo-banner .demo-asof { flex: 0 0 auto; color: var(--muted); font-family: var(--mono, monospace); }
+/* 需要真实服务端的动作（例如导出套期关系文档）在只读演示站上不显示 */
+[data-demo-hide] { display: none !important; }
 """
 
 

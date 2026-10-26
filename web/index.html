@@ -120,6 +120,7 @@
                   <th>币种</th>
                   <th>净敞口（CNY）</th>
                   <th>年化波动率</th>
+                  <th>历史波动率</th>
                   <th>σ 贡献（CNY）</th>
                   <th>占比</th>
                 </tr>
@@ -359,6 +360,10 @@
             </table>
           </div>
           <ul id="accountingNotes" class="notes-list"></ul>
+          <div class="plan-actions">
+            <a class="button-link" href="/api/accounting/report" target="_blank" rel="noopener" data-demo-hide>导出套期关系文档</a>
+            <span class="meta">自包含 HTML（内联样式、无脚本），浏览器里 Ctrl+P 可打印为 PDF 存档。</span>
+          </div>
         </section>
 
         <section id="plans" class="panel">
@@ -495,6 +500,17 @@
                 <option value="import">进口型</option>
               </select>
             </label>
+            <label>主体名称（报告抬头） <input name="entity_name" maxlength="100" placeholder="例如：某某进出口有限公司" /></label>
+            <label>编制人 <input name="prepared_by" maxlength="100" placeholder="姓名 / 岗位" /></label>
+            <label>套期会计准则
+              <select name="hedge_standard">
+                <option value="CAS24">CAS 24</option>
+                <option value="IFRS9">IFRS 9</option>
+                <option value="ASC815">ASC 815</option>
+              </select>
+            </label>
+            <label>OCI 期初余额 CNY <input name="oci_opening_cny" type="number" step="0.01" /></label>
+            <label>历史模拟窗口（交易日） <input name="historical_window_days" type="number" min="60" max="2000" step="10" /></label>
             <label>默认套保比例（%） <input name="default_hedge_ratio" type="number" min="0" max="100" step="5" /></label>
             <label>乐观场景涨跌幅（%） <input name="optimistic_shift_pct" type="number" min="-99.99" step="0.1" /></label>
             <label>悲观场景涨跌幅（%） <input name="pessimistic_shift_pct" type="number" min="-99.99" step="0.1" /></label>
