@@ -67,10 +67,14 @@ function formData(form) {
     "amount",
     "probability",
     "locked_rate",
+    "spot_at_trade",
     "actual_rate",
     "actual_amount",
     "rate_cache_hours",
     "risk_limit_cny",
+    "var_confidence",
+    "var_horizon_days",
+    "var_limit_cny",
     "forecast_max_age_days",
     "settlement_grace_days",
     "default_hedge_ratio",
@@ -157,12 +161,15 @@ function renderDashboard(data) {
   renderPortfolio(data.portfolio || {});
   renderForecastStatus(data);
   renderSuggestions(data.suggestions || []);
+  renderRisk(data.risk || {});
   renderNetExposure(data.net_exposures || []);
   renderExposureTable(data.exposures || []);
   renderHedgeTable(data.hedges || []);
   renderSettlementTable(data.settlements || []);
+  renderScenarioChart(data.scenario_totals || {});
   renderScenarioRows(data.scenario_rows || [], data.scenario_totals || {}, data.scenario_uniform);
   renderList("backtestRows", data.backtest || [], renderBacktest);
+  renderAccounting(data.hedge_accounting || {});
   renderPlanDrift(data.plan_drift || {});
   renderPlans(data.plans || []);
   renderAudit(data.audit || []);
@@ -453,7 +460,7 @@ function fillHedgeFromSuggestion(item) {
 function renderNetExposure(rows) {
   const body = document.getElementById("netExposureRows");
   body.innerHTML = "";
-  rows.forEach((row) => {
+  sortedRows("netTable", rows).forEach((row) => {
     const net = Number(row.net_exposure);
     const side = net > 0 ? { label: "净收", cls: "in" } : net < 0 ? { label: "净付", cls: "out" } : { label: "持平", cls: "flat" };
     const rateCell = row.rate_available
@@ -612,7 +619,11 @@ function renderDetailTable(tbodyId, countId, rows, columns, collection, emptyTex
     return;
   }
   body.innerHTML = "";
-  rows.slice().sort(byDueDate).forEach((row) => {
+  const tableId = body.closest("table")?.id;
+  const ordered = tableId && sortState[tableId]
+    ? sortedRows(tableId, rows)
+    : rows.slice().sort(byDueDate);
+  ordered.forEach((row) => {
     const tr = document.createElement("tr");
     const cells = columns.map((col) => {
       const value = col.render(row);
@@ -1113,6 +1124,9 @@ function renderConfig(config) {
   form.risk_limit_cny.value = config.risk_limit_cny ?? 200000;
   form.forecast_max_age_days.value = config.forecast_max_age_days ?? 7;
   form.settlement_grace_days.value = config.settlement_grace_days ?? 5;
+  form.var_confidence.value = config.var_confidence ?? 0.99;
+  form.var_horizon_days.value = config.var_horizon_days ?? 1;
+  form.var_limit_cny.value = config.var_limit_cny ?? 0;
   form.enterprise_type.value = config.enterprise_type || "comprehensive";
   for (const key of CONFIG_PERCENT_FIELDS) {
     form.elements[key].value = config[key] == null ? "" : Number(config[key]) * 100;
@@ -1363,6 +1377,286 @@ async function clearBusinessData() {
   });
 }
 
+// ==================== 排序 ====================
+
+const sortState = {};
+
+function compareValues(left, right) {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  const bothNumeric = left !== "" && right !== ""
+    && !Number.isNaN(leftNumber) && !Number.isNaN(rightNumber);
+  if (bothNumeric) return leftNumber - rightNumber;
+  const leftText = left == null ? "" : String(left);
+  const rightText = right == null ? "" : String(right);
+  return leftText.localeCompare(rightText, "zh-CN");
+}
+
+function sortedRows(tableId, rows) {
+  const state = sortState[tableId];
+  if (!state) return rows;
+  const direction = state.dir === "desc" ? -1 : 1;
+  return rows.slice().sort((left, right) => compareValues(left[state.key], right[state.key]) * direction);
+}
+
+function setupSorting() {
+  document.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const table = th.closest("table");
+      if (!table || !table.id) return;
+      const key = th.dataset.sort;
+      const current = sortState[table.id];
+      const dir = current && current.key === key && current.dir === "asc" ? "desc" : "asc";
+      sortState[table.id] = { key, dir };
+      updateSortIndicators();
+      if (dashboard) renderDashboard(dashboard);
+    });
+  });
+  updateSortIndicators();
+}
+
+function updateSortIndicators() {
+  document.querySelectorAll("th[data-sort]").forEach((th) => {
+    const table = th.closest("table");
+    const state = table && table.id ? sortState[table.id] : null;
+    const active = Boolean(state && state.key === th.dataset.sort);
+    th.classList.toggle("sorted-asc", active && state.dir === "asc");
+    th.classList.toggle("sorted-desc", active && state.dir === "desc");
+    if (active) th.setAttribute("aria-sort", state.dir === "asc" ? "ascending" : "descending");
+    else th.removeAttribute("aria-sort");
+  });
+}
+
+// ==================== 图表（纯 SVG，无外部依赖） ====================
+
+function ladderChart(rows) {
+  if (!rows || !rows.length) return '<p class="meta">暂无期限数据。</p>';
+  const width = 760;
+  const rowHeight = 34;
+  const left = 104;
+  const right = 132;
+  const barWidth = width - left - right;
+  const max = Math.max(1, ...rows.map((row) => Number(row.gross_cny) || 0));
+  let y = 8;
+  const parts = [];
+  rows.forEach((row) => {
+    const gross = Number(row.gross_cny) || 0;
+    const coverage = Math.max(0, Math.min(1, Number(row.coverage) || 0));
+    const totalWidth = gross ? Math.max(2, barWidth * (gross / max)) : 0;
+    const lockedWidth = totalWidth * coverage;
+    parts.push(`<text class="chart-label" x="0" y="${y + 13}">${escapeHtml(row.label)}</text>`);
+    parts.push(`<rect class="bar-total" x="${left}" y="${y}" width="${totalWidth.toFixed(1)}" height="18" rx="3"></rect>`);
+    parts.push(`<rect class="bar-locked" x="${left}" y="${y}" width="${lockedWidth.toFixed(1)}" height="18" rx="3"></rect>`);
+    parts.push(`<text class="chart-value" x="${width}" y="${y + 13}" text-anchor="end">${money(gross)}</text>`);
+    y += rowHeight;
+  });
+  return `<svg viewBox="0 0 ${width} ${y}" role="img" aria-label="期限梯度：业务敞口与已锁金额">${parts.join("")}</svg>`;
+}
+
+function scenarioBars(totals) {
+  const names = ["neutral", "optimistic", "pessimistic", "custom"].filter((name) => totals[name]);
+  if (!names.length) return "";
+  const width = 760;
+  const rowHeight = 36;
+  const labelWidth = 96;
+  const valueWidth = 140;
+  const span = width - labelWidth - valueWidth;
+  const zero = labelWidth + span / 2;
+  const max = Math.max(1, ...names.map((name) => Math.abs(Number(totals[name].total_projected_gain_loss) || 0)));
+  let y = 8;
+  const parts = [
+    `<line class="chart-axis" x1="${zero}" y1="0" x2="${zero}" y2="${names.length * rowHeight + 8}"></line>`,
+  ];
+  names.forEach((name) => {
+    const value = Number(totals[name].total_projected_gain_loss) || 0;
+    const length = (Math.abs(value) / max) * (span / 2);
+    const positive = value >= 0;
+    const x = positive ? zero : zero - length;
+    parts.push(`<text class="chart-label" x="0" y="${y + 13}">${escapeHtml(scenarioName(name))}</text>`);
+    parts.push(`<rect class="${positive ? "bar-pos" : "bar-neg"}" x="${x.toFixed(1)}" y="${y}" width="${Math.max(1, length).toFixed(1)}" height="18" rx="3"></rect>`);
+    parts.push(`<text class="chart-value" x="${width}" y="${y + 13}" text-anchor="end">${money(value)}</text>`);
+    y += rowHeight;
+  });
+  return `<svg viewBox="0 0 ${width} ${y}" role="img" aria-label="情景合计损益">${parts.join("")}</svg>`;
+}
+
+function contributionBars(positions) {
+  if (!positions || !positions.length) return "";
+  const width = 760;
+  const rowHeight = 32;
+  const left = 64;
+  const right = 150;
+  const barWidth = width - left - right;
+  const max = Math.max(1, ...positions.map((row) => Math.abs(Number(row.contribution_cny) || 0)));
+  let y = 8;
+  const parts = [];
+  positions.forEach((row) => {
+    const value = Number(row.contribution_cny) || 0;
+    const length = (Math.abs(value) / max) * barWidth;
+    parts.push(`<text class="chart-label" x="0" y="${y + 13}">${escapeHtml(row.currency)}</text>`);
+    parts.push(`<rect class="${value >= 0 ? "bar-pos" : "bar-neg"}" x="${left}" y="${y}" width="${Math.max(1, length).toFixed(1)}" height="18" rx="3"></rect>`);
+    parts.push(`<text class="chart-value" x="${width}" y="${y + 13}" text-anchor="end">${money(value)}</text>`);
+    y += rowHeight;
+  });
+  return `<svg viewBox="0 0 ${width} ${y}" role="img" aria-label="VaR 贡献">${parts.join("")}</svg>`;
+}
+
+// ==================== 风险 ====================
+
+function renderRisk(risk) {
+  const cards = document.getElementById("riskCards");
+  const scope = document.getElementById("riskScope");
+  if (!cards) return;
+  if (!risk || !risk.positions || !risk.positions.length) {
+    cards.innerHTML = '<div class="kpi"><span class="kpi-label">暂无风险数据</span><strong class="kpi-value">—</strong><span class="kpi-note">先添加带汇率的敞口</span></div>';
+    ["ladderChart", "ladderRows", "varChart", "varRows", "corrMatrix", "riskNotes"].forEach((id) => {
+      const element = document.getElementById(id);
+      if (element) element.innerHTML = "";
+    });
+    if (scope) scope.textContent = "";
+    return;
+  }
+  const confidence = Math.round(Number(risk.confidence || 0.99) * 100);
+  cards.innerHTML = [
+    kpiCard(
+      `VaR（${confidence}% / ${risk.horizon_days} 天）`,
+      `${money(risk.var_cny)} CNY`,
+      `组合 σ ${money(risk.sigma_cny)} CNY`,
+      risk.over_limit ? "warn" : "",
+    ),
+    kpiCard("预期尾部损失 ES", `${money(risk.es_cny)} CNY`, "超过 VaR 那部分的平均亏损"),
+    kpiCard("对冲降低的 VaR", `${money(risk.hedge_benefit_cny)} CNY`, `未对冲 VaR ${money(risk.var_gross_cny)}`),
+    kpiCard(
+      "限额使用率",
+      risk.limit_utilization == null ? "未设限额" : ratioText(risk.limit_utilization),
+      risk.limit_cny ? `限额 ${money(risk.limit_cny)} CNY` : "在配置里填 VaR 限额后启用",
+      risk.over_limit ? "warn" : "",
+    ),
+  ].join("");
+  if (scope) {
+    scope.textContent = `${risk.asof} · ${risk.positions.length} 个币种 · σ ${(Number(risk.sigma_pct || 0) * 100).toFixed(2)}% / 年`;
+  }
+
+  const ladder = (risk.ladder || {}).rows || [];
+  document.getElementById("ladderChart").innerHTML = ladderChart(ladder);
+  document.getElementById("ladderRows").innerHTML = ladder.length
+    ? ladder.map((row) => `
+      <tr>
+        <td>${escapeHtml(row.label)}</td>
+        <td class="num">${money(row.gross_cny)}</td>
+        <td class="num">${money(row.locked_cny)}</td>
+        <td class="num">${money(row.net_cny)}</td>
+        <td>${ratioBar(row.coverage)} ${ratioText(row.coverage)}</td>
+        <td class="num">${row.periods}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="6" class="empty-row">还没有敞口。</td></tr>';
+
+  const positions = risk.positions || [];
+  document.getElementById("varChart").innerHTML = contributionBars(positions);
+  document.getElementById("varRows").innerHTML = positions.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.currency)}</td>
+      <td class="num">${money(row.net_cny)}</td>
+      <td class="num">${(Number(row.vol) * 100).toFixed(1)}%</td>
+      <td class="num">${money(row.contribution_cny)}</td>
+      <td class="num">${(Number(row.contribution_pct) * 100).toFixed(1)}%</td>
+    </tr>
+  `).join("");
+
+  renderCorrelations(risk.correlations || {});
+  const notes = document.getElementById("riskNotes");
+  notes.innerHTML = (risk.notes || []).map((note) => `<li>${escapeHtml(note)}</li>`).join("");
+}
+
+function renderCorrelations(correlations) {
+  const box = document.getElementById("corrMatrix");
+  const currencies = correlations.currencies || [];
+  if (currencies.length < 2) {
+    box.innerHTML = '<p class="meta">只有一个币种，相关性矩阵没有意义。</p>';
+    return;
+  }
+  const head = `<tr><th></th>${currencies.map((currency) => `<th>${escapeHtml(currency)}</th>`).join("")}</tr>`;
+  const body = correlations.matrix.map((row, index) => {
+    const cells = row.map((value, column) => {
+      const rho = Number(value);
+      if (index === column) return '<td class="corr corr-diag">1.00</td>';
+      const isConfigured = !correlations.configured || correlations.configured[index][column];
+      const alpha = Math.min(0.55, Math.abs(rho) * 0.55);
+      const color = rho >= 0 ? `rgba(201, 100, 66, ${alpha})` : `rgba(74, 111, 165, ${alpha})`;
+      const mark = isConfigured ? "" : '<sup title="未配置，按 1.00 计入">*</sup>';
+      return `<td class="corr${isConfigured ? "" : " corr-default"}" style="background:${color}" title="${escapeHtml(currencies[index])} / ${escapeHtml(currencies[column])}">${rho.toFixed(2)}${mark}</td>`;
+    }).join("");
+    return `<tr><th>${escapeHtml(currencies[index])}</th>${cells}</tr>`;
+  }).join("");
+  box.innerHTML = `
+    <div class="table-wrap">
+      <table class="corr-table"><thead>${head}</thead><tbody>${body}</tbody></table>
+    </div>
+  `;
+}
+
+// ==================== 对冲会计 ====================
+
+const HEDGE_TYPE_NAMES = {
+  cash_flow: "现金流量套期",
+  fair_value: "公允价值套期",
+  net_investment: "境外经营净投资",
+};
+
+function hedgeTypeName(value) {
+  return HEDGE_TYPE_NAMES[value] || value || "-";
+}
+
+function renderAccounting(accounting) {
+  const cards = document.getElementById("accountingCards");
+  const scope = document.getElementById("accountingScope");
+  if (!cards) return;
+  const rows = accounting.rows || [];
+  if (scope) {
+    scope.textContent = rows.length ? `${accounting.asof} · ${rows.length} 笔远期 · ${accounting.designated_count} 笔已指定` : "";
+  }
+  const totals = accounting.totals || {};
+  cards.innerHTML = [
+    kpiCard("OCI 本期变动", `${money(totals.oci_cny)} CNY`, `已结转 ${money(totals.reclassified_cny)} CNY`),
+    kpiCard("无效部分（损益）", `${money(totals.ineffective_cny)} CNY`, `${accounting.ineffective_count || 0} 笔存在无效部分`),
+    kpiCard("远期 MtM 合计", `${money(totals.mtm_cny)} CNY`, "按 CIP 曲线重估"),
+    kpiCard("未结清", `${accounting.open_count || 0} 笔`, `共 ${accounting.designated_count || 0} 笔已指定`),
+  ].join("");
+  document.getElementById("accountingRows").innerHTML = rows.length
+    ? rows.map((row) => {
+      const effectiveness = row.effectiveness == null ? "—" : ratioText(row.effectiveness);
+      const warnings = (row.warnings || []).map(escapeHtml).join("；") || "—";
+      return `
+        <tr>
+          <td>${escapeHtml(row.period)} ${escapeHtml(row.currency)}${row.settled ? ' <span class="warn-tag" title="该期间已录入实际汇率，按结算价重分类">已结算</span>' : ""}</td>
+          <td>${escapeHtml(hedgeTypeName(row.hedge_type))}</td>
+          <td class="num">${money(row.notional)} / ${money(row.allocated)}</td>
+          <td class="num">${row.locked_rate}</td>
+          <td class="num">${row.spot_rate == null ? "—" : row.spot_rate}</td>
+          <td class="num">${money(row.mtm_cny)}</td>
+          <td class="num">${money(row.delta_item_cny)}</td>
+          <td class="num">${effectiveness}</td>
+          <td class="num">${money(row.effective_cny)}</td>
+          <td class="num">${money(row.ineffective_cny)}</td>
+          <td class="num">${money(row.oci_cny)}</td>
+          <td class="num">${money(row.pl_cny)}</td>
+          <td class="col-note">${warnings}</td>
+        </tr>
+      `;
+    }).join("")
+    : '<tr><td colspan="13" class="empty-row">还没有锁汇记录。</td></tr>';
+  const notes = document.getElementById("accountingNotes");
+  notes.innerHTML = (accounting.warnings || []).slice(0, 12)
+    .map((note) => `<li>${escapeHtml(note)}</li>`)
+    .join("");
+}
+
+function renderScenarioChart(totals) {
+  const box = document.getElementById("scenarioChart");
+  if (box) box.innerHTML = scenarioBars(totals || {});
+}
+
 function bindForms() {
   const exposureForm = document.getElementById("exposureForm");
   bindDataManagement();
@@ -1483,6 +1777,7 @@ async function runAction(busyMessage, action, finallyAction = null) {
 }
 
 bindForms();
+setupSorting();
 setupSideNav();
 setDefaultDates();
 showStatus("正在加载数据...", "busy");

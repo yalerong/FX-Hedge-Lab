@@ -28,7 +28,9 @@ from urllib.request import Request, urlopen
 from money import D, f2, f as fN, q
 import benchmarks
 import forwards
+import hedge_accounting
 import plans
+import risk
 import variance
 
 
@@ -84,6 +86,14 @@ DEFAULT_CONFIG = {
     # 对"净收美元 + 净付欧元"这种组合会天然对冲、把风险算小，
     # 要按币种分别设就写在这里：{"USD": {"optimistic": 0.03, ...}}
     "scenario_shifts": {},
+    # 组合风险：年化波动率与相关系数都只是开箱默认值，**用之前换成自己的**。
+    # 未配置的币种按 8% 波动率、未配置的货币对按相关系数 1.0 计算，
+    # 页面会把这两条假设逐条列出来。
+    "annual_vol": dict(risk.DEFAULT_VOL),
+    "correlations": {},
+    "var_confidence": 0.99,
+    "var_horizon_days": 1,
+    "var_limit_cny": 0,
 }
 
 
@@ -471,6 +481,45 @@ def validate_config(payload: dict, base: dict | None = None, replace_maps: set[s
                 raise ValueError(f"scenario_shifts.{currency}.{scenario} 必须大于 -1")
             scenario_shifts[currency][scenario] = shift
     config["scenario_shifts"] = scenario_shifts
+
+    annual_vol = {}
+    for currency, value in (config.get("annual_vol") or {}).items():
+        validate_currency_code(currency, "annual_vol")
+        vol = finite_number(value, f"annual_vol.{currency}")
+        if not 0 < vol <= 3:
+            raise ValueError(f"annual_vol.{currency} 必须在 (0, 3] 之间")
+        annual_vol[currency] = vol
+    config["annual_vol"] = annual_vol
+
+    correlations = {}
+    for key, value in (config.get("correlations") or {}).items():
+        if not isinstance(key, str) or key.count(":") != 1:
+            raise ValueError("correlations 的键必须是 USD:EUR 这种形式")
+        left, right = key.split(":")
+        validate_currency_code(left, "correlations")
+        validate_currency_code(right, "correlations")
+        if left == right:
+            raise ValueError(f"correlations.{key} 不能是同一币种")
+        rho = finite_number(value, f"correlations.{key}")
+        if not -1 <= rho <= 1:
+            raise ValueError(f"correlations.{key} 必须在 -1 到 1 之间")
+        correlations[key] = rho
+    for key, value in correlations.items():
+        left, right = key.split(":")
+        opposite = correlations.get(f"{right}:{left}")
+        if opposite is not None and abs(opposite - value) > 1e-9:
+            raise ValueError(f"correlations 里 {key} 与 {right}:{left} 冲突")
+    config["correlations"] = correlations
+
+    confidence = finite_number(config.get("var_confidence", 0.99), "var_confidence")
+    if not 0.5 < confidence < 1:
+        raise ValueError("var_confidence 必须在 0.5 到 1 之间")
+    config["var_confidence"] = confidence
+    horizon = positive_number(config.get("var_horizon_days", 1), "var_horizon_days")
+    if horizon > 250:
+        raise ValueError("var_horizon_days 不能超过 250 个交易日")
+    config["var_horizon_days"] = int(horizon)
+    config["var_limit_cny"] = non_negative_number(config.get("var_limit_cny", 0), "var_limit_cny")
 
     for key, value in config["confirmed_parameters"].items():
         if not isinstance(key, str) or not isinstance(value, bool):
@@ -1397,6 +1446,29 @@ def build_dashboard(
     plan_list = state.get("plans", [])
     latest_plan = plan_list[-1] if plan_list else None
     plan_drift = plans.drift(latest_plan, config, pair_rates, forecast_signals)
+    asof = today or dt_date.today()
+    risk_view = risk.build(net_rows, config, asof)
+    settled_rates = {}
+    for row in settlements:
+        try:
+            rate_value = float(row.get("actual_rate", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if rate_value > 0:
+            settled_rates[(period_from_date(row.get("due_date", "")), row.get("currency", "").upper())] = rate_value
+    accounting_scope = [
+        {
+            "period": key[0],
+            "currency": key[1],
+            "gross": exposure_totals.get(key, 0.0),
+            "category": exposure_category_for(exposures, key[0], key[1]),
+            "hedges": hedges_by_key.get(key, []),
+        }
+        for key in sorted(set(exposure_totals) | set(hedge_totals))
+    ]
+    accounting = hedge_accounting.build(
+        accounting_scope, pair_rates, config, asof, settled_rates=settled_rates
+    )
     return {
         "workspace": {
             "metadata": state.get("metadata", {}),
@@ -1419,6 +1491,8 @@ def build_dashboard(
         "scenario_totals": scenario_totals,
         "scenario_summary": scenario_summary,
         "backtest": backtest_rows,
+        "risk": risk_view,
+        "hedge_accounting": accounting,
         "audit": read_audit(30),
         "plans": plan_list[-10:][::-1],
         "plan_drift": plan_drift,
@@ -1927,7 +2001,7 @@ CSV_FIELDS = {
     ],
     "hedges": [
         "id", "created_at", "trade_date", "due_date", "currency", "action", "amount",
-        "locked_rate", "designated_period", "description",
+        "locked_rate", "designated_period", "hedge_type", "spot_at_trade", "description",
     ],
     "settlements": [
         "id", "created_at", "due_date", "currency", "actual_rate", "actual_amount", "description",
@@ -2290,7 +2364,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                         key for key in (
                             "interest_rates", "forward_overrides", "scenario_shifts",
                             "month_currency_hedge_ratios", "monthly_average_rates",
-                            "confirmed_parameters",
+                            "confirmed_parameters", "annual_vol", "correlations",
                         )
                         if key in body
                     }
@@ -2598,6 +2672,18 @@ def validate_hedge(row: dict, config: dict | None = None) -> None:
         row.pop("designated_period", None)
     else:
         row["designated_period"] = validate_period(designated, "designated_period")
+    # 套期类型：留空则按被套项目的风险类型推导（资产负债表 -> 公允价值套期）。
+    hedge_type = row.get("hedge_type")
+    if hedge_type in (None, ""):
+        row.pop("hedge_type", None)
+    elif hedge_type not in hedge_accounting.VALID_TYPES:
+        raise ValueError("hedge_type 必须是 " + "/".join(hedge_accounting.VALID_TYPES))
+    # 交易日即期是有效性测试的分母；没有它只能用锁定价近似，页面会标出来。
+    spot_at_trade = row.get("spot_at_trade")
+    if spot_at_trade in (None, ""):
+        row.pop("spot_at_trade", None)
+    else:
+        row["spot_at_trade"] = positive_number(spot_at_trade, "spot_at_trade")
 
 
 def validate_settlement(row: dict, config: dict | None = None) -> None:

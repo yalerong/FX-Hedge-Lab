@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>外汇风险与锁汇工作台</title>
-    <link rel="stylesheet" href="/web/styles.css?v=17" />
+    <link rel="stylesheet" href="/web/styles.css?v=18" />
   </head>
   <body>
     <header class="topbar">
@@ -24,6 +24,7 @@
         <div class="nav-group">
           <span class="nav-title">统计区</span>
           <a href="#cockpit" data-nav="cockpit">驾驶舱</a>
+          <a href="#risk" data-nav="risk">风险</a>
           <a href="#exposure-table" data-nav="exposure-table">净敞口</a>
           <a href="#scenario" data-nav="scenario">损益场景</a>
         </div>
@@ -37,6 +38,7 @@
         <div class="nav-group">
           <span class="nav-title">其他</span>
           <a href="#plans" data-nav="plans">方案存档</a>
+          <a href="#accounting" data-nav="accounting">对冲会计</a>
           <a href="#audit" data-nav="audit">变更记录</a>
           <a href="#dataManagement" data-nav="dataManagement">数据管理</a>
           <a href="#rates" data-nav="rates">汇率与缓存</a>
@@ -85,21 +87,66 @@
           <p class="notice" id="portfolioNote"></p>
         </section>
 
+        <!-- 风险 -->
+        <section id="risk" class="panel">
+          <div class="panel-title">
+            <h2>风险</h2>
+            <span class="meta" id="riskScope"></span>
+          </div>
+          <div id="riskCards" class="kpi-grid"></div>
+          <h3 class="subhead">期限梯度</h3>
+          <div id="ladderChart" class="chart"></div>
+          <div class="table-wrap">
+            <table id="ladderTable">
+              <thead>
+                <tr>
+                  <th>期限</th>
+                  <th>业务敞口（CNY）</th>
+                  <th>已锁（CNY）</th>
+                  <th>剩余（CNY）</th>
+                  <th>覆盖率</th>
+                  <th>敞口组数</th>
+                </tr>
+              </thead>
+              <tbody id="ladderRows"></tbody>
+            </table>
+          </div>
+          <h3 class="subhead">VaR 贡献</h3>
+          <div id="varChart" class="chart"></div>
+          <div class="table-wrap">
+            <table id="varTable">
+              <thead>
+                <tr>
+                  <th>币种</th>
+                  <th>净敞口（CNY）</th>
+                  <th>年化波动率</th>
+                  <th>σ 贡献（CNY）</th>
+                  <th>占比</th>
+                </tr>
+              </thead>
+              <tbody id="varRows"></tbody>
+            </table>
+          </div>
+          <h3 class="subhead">相关性矩阵</h3>
+          <div id="corrMatrix"></div>
+          <ul id="riskNotes" class="notes-list"></ul>
+        </section>
+
         <section id="exposure-table" class="panel">
           <h2>净敞口</h2>
           <div class="table-wrap">
-            <table>
+            <table id="netTable">
               <thead>
                 <tr>
-                  <th>期间</th>
-                  <th>币种</th>
-                  <th>风险类型</th>
-                  <th>目标套保比例</th>
-                  <th>业务敞口</th>
-                  <th>已锁敞口</th>
-                  <th>剩余敞口</th>
-                  <th>当前汇率</th>
-                  <th>人民币风险</th>
+                  <th data-sort="period">期间</th>
+                  <th data-sort="currency">币种</th>
+                  <th data-sort="risk_category">风险类型</th>
+                  <th data-sort="target_hedge_ratio">目标套保比例</th>
+                  <th data-sort="business_exposure">业务敞口</th>
+                  <th data-sort="locked_exposure">已锁敞口</th>
+                  <th data-sort="net_exposure">剩余敞口</th>
+                  <th data-sort="current_rate">当前汇率</th>
+                  <th data-sort="cny_risk">人民币风险</th>
                 </tr>
               </thead>
               <tbody id="netExposureRows"></tbody>
@@ -109,6 +156,7 @@
 
         <section id="scenario" class="panel">
           <h2>预计损益场景</h2>
+          <div id="scenarioChart" class="chart"></div>
           <div id="scenarioRows" class="list"></div>
         </section>
 
@@ -169,6 +217,15 @@
             </label>
             <label>锁汇金额 <input name="amount" type="number" min="0.01" step="0.01" required /></label>
             <label>锁定汇率 <input name="locked_rate" type="number" min="0.000001" step="0.000001" required /></label>
+            <label>交易日即期 <input name="spot_at_trade" type="number" min="0.000001" step="0.000001" placeholder="选填；有效性测试的分母" /></label>
+            <label>套期类型
+              <select name="hedge_type">
+                <option value="">自动（按风险类型推导）</option>
+                <option value="cash_flow">现金流量套期</option>
+                <option value="fair_value">公允价值套期</option>
+                <option value="net_investment">境外经营净投资套期</option>
+              </select>
+            </label>
             <label>对应期间 <input name="designated_period" type="month" />
               <span class="field-hint">交割日跨月时填（如 3/31 的敞口、4/2 交割，填该年 03），留空按交割日所在月</span>
             </label>
@@ -184,17 +241,17 @@
               <span class="meta" id="exposureCount"></span>
             </div>
             <div class="table-wrap">
-              <table class="detail-table">
+              <table class="detail-table" id="exposureTable">
                 <thead>
                   <tr>
-                    <th>到期日</th>
-                    <th>币种</th>
-                    <th>方向</th>
-                    <th>金额</th>
-                    <th>概率</th>
-                    <th>风险类型</th>
-                    <th>已入账</th>
-                    <th>备注</th>
+                    <th data-sort="due_date">到期日</th>
+                    <th data-sort="currency">币种</th>
+                    <th data-sort="direction">方向</th>
+                    <th data-sort="amount">金额</th>
+                    <th data-sort="probability">概率</th>
+                    <th data-sort="category">风险类型</th>
+                    <th data-sort="booked">已入账</th>
+                    <th data-sort="description">备注</th>
                     <th class="col-action"></th>
                   </tr>
                 </thead>
@@ -208,17 +265,17 @@
               <span class="meta" id="hedgeCount"></span>
             </div>
             <div class="table-wrap">
-              <table class="detail-table">
+              <table class="detail-table" id="hedgeTable">
                 <thead>
                   <tr>
-                    <th>交易日</th>
-                    <th>到期日</th>
-                    <th>对应期间</th>
-                    <th>币种</th>
-                    <th>操作</th>
-                    <th>金额</th>
-                    <th>锁定汇率</th>
-                    <th>备注</th>
+                    <th data-sort="trade_date">交易日</th>
+                    <th data-sort="due_date">到期日</th>
+                    <th data-sort="designated_period">对应期间</th>
+                    <th data-sort="currency">币种</th>
+                    <th data-sort="action">操作</th>
+                    <th data-sort="amount">金额</th>
+                    <th data-sort="locked_rate">锁定汇率</th>
+                    <th data-sort="description">备注</th>
                     <th class="col-action"></th>
                   </tr>
                 </thead>
@@ -232,14 +289,14 @@
               <span class="meta" id="settlementCount"></span>
             </div>
             <div class="table-wrap">
-              <table class="detail-table">
+              <table class="detail-table" id="settlementTable">
                 <thead>
                   <tr>
-                    <th>到期日</th>
-                    <th>币种</th>
-                    <th>实际汇率</th>
-                    <th>实际发生额</th>
-                    <th>备注</th>
+                    <th data-sort="due_date">到期日</th>
+                    <th data-sort="currency">币种</th>
+                    <th data-sort="actual_rate">实际汇率</th>
+                    <th data-sort="actual_amount">实际发生额</th>
+                    <th data-sort="description">备注</th>
                     <th class="col-action"></th>
                   </tr>
                 </thead>
@@ -269,6 +326,41 @@
         </section>
 
         <!-- ==================== 其他 ==================== -->
+        <section id="accounting" class="panel">
+          <div class="panel-title">
+            <h2>对冲会计底稿</h2>
+            <span class="meta" id="accountingScope"></span>
+          </div>
+          <p class="notice notice-warn">
+            管理会计底稿，不替代总账或审计：只做「指定关系 → 有效性测试 → OCI / 损益拆分」，
+            不含科目表、税、减值与套期关系文档。缺交易日即期时按起息日平价近似。
+          </p>
+          <div id="accountingCards" class="kpi-grid"></div>
+          <div class="table-wrap">
+            <table id="accountingTable">
+              <thead>
+                <tr>
+                  <th>期间 / 币种</th>
+                  <th>类型</th>
+                  <th>名义 / 指定</th>
+                  <th>锁定价</th>
+                  <th>现汇</th>
+                  <th>远期 MtM</th>
+                  <th>被套项目变动</th>
+                  <th>有效性</th>
+                  <th>有效部分</th>
+                  <th>无效部分</th>
+                  <th>OCI</th>
+                  <th>损益</th>
+                  <th>警示</th>
+                </tr>
+              </thead>
+              <tbody id="accountingRows"></tbody>
+            </table>
+          </div>
+          <ul id="accountingNotes" class="notes-list"></ul>
+        </section>
+
         <section id="plans" class="panel">
           <div class="panel-title">
             <h2>方案存档</h2>
@@ -351,6 +443,9 @@
             <label>预测信号有效期（天） <input name="forecast_max_age_days" type="number" min="0" step="1" /></label>
             <label>跨月归集容差（天） <input name="settlement_grace_days" type="number" min="0" max="31" step="1" /></label>
             <label>风险阈值 CNY（仅提示） <input name="risk_limit_cny" type="number" min="0" step="1000" /></label>
+            <label>VaR 置信度 <input name="var_confidence" type="number" min="0.5" max="0.999" step="0.001" /></label>
+            <label>VaR 期限（交易日） <input name="var_horizon_days" type="number" min="1" max="250" step="1" /></label>
+            <label>VaR 限额 CNY <input name="var_limit_cny" type="number" min="0" step="10000" /></label>
             <label>企业类型
               <select name="enterprise_type">
                 <option value="comprehensive">综合型</option>
@@ -364,6 +459,8 @@
             <label>自定义场景涨跌幅（%） <input name="custom_scenario_shift_pct" type="number" min="-99.99" step="0.1" /></label>
             <label>支持币种 JSON <textarea name="supported_currencies" rows="3" data-json-field data-json-type="array" placeholder='["USD","EUR","JPY"]'></textarea></label>
             <label>资金利率 JSON <textarea name="interest_rates" rows="4" data-json-field placeholder='{"CNY":0.019,"USD":0.043}'></textarea></label>
+            <label>年化波动率 JSON <textarea name="annual_vol" rows="4" data-json-field placeholder='{"USD":0.05,"EUR":0.07}'></textarea></label>
+            <label>相关系数 JSON <textarea name="correlations" rows="4" data-json-field placeholder='{"USD:EUR":0.35,"USD:JPY":0.25}'></textarea></label>
             <label>银行远期报价 JSON <textarea name="forward_overrides" rows="4" data-json-field placeholder='{"2027-03:USD":7.08}'></textarea></label>
             <label>分月分币种套保比例 JSON（0–1） <textarea name="month_currency_hedge_ratios" rows="4" data-json-field placeholder='{"2027-03":{"USD":0.75}}'></textarea></label>
             <label>分币种场景 JSON（小数，-0.01 = -1%） <textarea name="scenario_shifts" rows="4" data-json-field placeholder='{"EUR":{"optimistic":-0.01}}'></textarea></label>
@@ -382,6 +479,6 @@
       </main>
     </div>
 
-    <script src="/web/app.js?v=17"></script>
+    <script src="/web/app.js?v=18"></script>
   </body>
 </html>

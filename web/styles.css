@@ -239,6 +239,110 @@ textarea {
   color: var(--muted);
 }
 
+/* ===== 图表：纯 SVG，无外部依赖 ===== */
+.chart {
+  margin: 6px 0 14px;
+}
+
+.chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.chart-label {
+  font-size: 11px;
+  fill: var(--muted);
+}
+
+.chart-value {
+  font-size: 11px;
+  fill: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-axis {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.bar-total {
+  fill: var(--neutral-soft);
+}
+
+.bar-locked,
+.bar-pos {
+  fill: var(--accent);
+}
+
+.bar-neg {
+  fill: var(--info);
+}
+
+h3.subhead {
+  font-size: 14px;
+  margin: 18px 0 8px;
+  color: var(--text);
+}
+
+.notes-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notes-list li {
+  margin: 3px 0;
+}
+
+.corr-table {
+  width: auto;
+}
+
+.corr-table th,
+.corr-table td {
+  text-align: center;
+  min-width: 54px;
+}
+
+.corr-table td.corr {
+  font-variant-numeric: tabular-nums;
+}
+
+.corr-diag {
+  background: var(--neutral-soft);
+  color: var(--muted);
+}
+
+th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+th[data-sort]:hover {
+  color: var(--text);
+}
+
+th.sorted-asc::after {
+  content: " ▲";
+  font-size: 10px;
+  color: var(--accent);
+}
+
+th.sorted-desc::after {
+  content: " ▼";
+  font-size: 10px;
+  color: var(--accent);
+}
+
+td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 input:focus,
 select:focus,
 textarea:focus,
