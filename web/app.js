@@ -75,6 +75,8 @@ function formData(form) {
     "var_confidence",
     "var_horizon_days",
     "var_limit_cny",
+    "default_spread_bp",
+    "quote_max_age_hours",
     "forecast_max_age_days",
     "settlement_grace_days",
     "default_hedge_ratio",
@@ -158,6 +160,7 @@ function scenarioAssumptionNote(uniform) {
 function renderDashboard(data) {
   renderWorkspace(data.workspace || {});
   renderRateStatus(data);
+  renderQuotes(data.quotes || {});
   renderPortfolio(data.portfolio || {});
   renderForecastStatus(data);
   renderSuggestions(data.suggestions || []);
@@ -348,6 +351,7 @@ function renderSuggestions(items) {
       <p class="meta">剩余敞口：${money(item.net_exposure)}，目标套保比例：${ratioLine}，损益科目：${bucketName(item.accounting_bucket)}</p>
       <p class="meta">建议金额：${money(item.recommended_amount)}，交易汇率：${item.trade_rate}${forwardTag(item)}，人民币风险：${money(item.risk_cny)}</p>
       ${forwardLine(item)}
+      ${quoteLine(item)}
       ${item.past_due
         ? '<p class="notice notice-warn">到期日已过，按今天的交易日已经下不了这张远期单：请到「结算明细」登记实际结果，或把敞口的到期日改到未来。</p><button type="button" disabled>按建议填入锁汇单</button>'
         : '<button type="button">按建议填入锁汇单</button>'}
@@ -382,6 +386,61 @@ function forwardLine(item) {
   const points = Number(item.forward_points || 0);
   const word = points === 0 ? "持平" : points > 0 ? "升水" : "贴水";
   return `<p class="meta">即期 ${item.spot_rate} → 远期 ${item.forward_rate}（${word} ${Math.abs(points).toFixed(6)}，期限 ${item.tenor_years} 年）</p>`;
+}
+
+// 可成交价：卖出拿 bid、买入拿 ask。中间价只用于估值，不能当成交价展示。
+function quoteLine(item) {
+  if (item.bid == null || item.ask == null) return "";
+  const sell = item.action === "sell_foreign";
+  const executable = sell ? item.bid : item.ask;
+  const stale = item.quote_stale
+    ? ' <span class="warn-tag" title="报价超过有效期，建议刷新后再执行">报价过期</span>'
+    : "";
+  const spread = item.spread_source === "default" ? " · 默认价差" : "";
+  const asof = item.quote_asof ? escapeHtml(fmtTime(item.quote_asof)) : "—";
+  return `<p class="meta">可成交价 <b>${item.trade_rate}</b>（${sell ? "bid" : "ask"} ${executable}，中间价 ${item.mid_rate}，价差 ${item.spread_bp}bp${spread}），点差成本约 ${money(item.spread_cost_cny)} CNY；来源 ${escapeHtml(item.quote_source || "-")}，时点 ${asof}${stale}</p>`;
+}
+
+function renderQuotes(book) {
+  const status = document.getElementById("rateStatus");
+  const spotBody = document.getElementById("quoteSpotRows");
+  if (!spotBody || !book) return;
+  const stale = Boolean(book.stale);
+  if (status) {
+    status.textContent = `${stale ? "报价已过期" : "报价有效"}${book.asof ? " · " + fmtTime(book.asof) : ""}`;
+  }
+  const spots = book.spot || [];
+  spotBody.innerHTML = spots.length ? spots.map((q) => `
+    <tr>
+      <td>${escapeHtml(q.currency)}</td>
+      <td class="num">${q.bid}</td>
+      <td class="num">${q.ask}</td>
+      <td class="num">${q.mid}</td>
+      <td class="num">${q.spread_bp}bp</td>
+      <td>${escapeHtml(q.source)}</td>
+      <td>${q.asof ? escapeHtml(fmtTime(q.asof)) : "—"}</td>
+      <td>${q.stale ? '<span class="warn-tag">过期</span>' : '<span class="chip">有效</span>'}</td>
+    </tr>`).join("") : '<tr><td colspan="8" class="empty-row">还没有报价。</td></tr>';
+  const forwards = book.forwards || [];
+  document.getElementById("quoteForwardRows").innerHTML = forwards.length ? forwards.map((q) => `
+    <tr>
+      <td>${escapeHtml(q.period)}</td>
+      <td>${escapeHtml(q.currency)}</td>
+      <td class="num">${q.bid}</td>
+      <td class="num">${q.ask}</td>
+      <td class="num">${q.mid}</td>
+      <td class="num">${q.spread_bp}bp</td>
+      <td>${escapeHtml(q.source)}</td>
+      <td>${q.stale ? '<span class="warn-tag">过期</span>' : '<span class="chip">有效</span>'}</td>
+    </tr>`).join("") : '<tr><td colspan="8" class="empty-row">还没有需要定价的远期。</td></tr>';
+  const defaultSpread = spots.concat(forwards).filter((q) => q.spread_source === "default").length;
+  const notes = [];
+  if (stale && book.stale_reason) notes.push(book.stale_reason);
+  if (defaultSpread) {
+    notes.push(`${defaultSpread} 条报价用默认价差；有银行双向报价就填进 quote_overrides / spot_overrides。`);
+  }
+  notes.push("卖出外币用 bid、买入外币用 ask；情景与会计用中间价。");
+  document.getElementById("quoteNotes").textContent = notes.join(" ");
 }
 
 function renderForecastBlock(item) {
@@ -1127,6 +1186,8 @@ function renderConfig(config) {
   form.var_confidence.value = config.var_confidence ?? 0.99;
   form.var_horizon_days.value = config.var_horizon_days ?? 1;
   form.var_limit_cny.value = config.var_limit_cny ?? 0;
+  form.default_spread_bp.value = config.default_spread_bp ?? 10;
+  form.quote_max_age_hours.value = config.quote_max_age_hours ?? 24;
   form.enterprise_type.value = config.enterprise_type || "comprehensive";
   for (const key of CONFIG_PERCENT_FIELDS) {
     form.elements[key].value = config[key] == null ? "" : Number(config[key]) * 100;

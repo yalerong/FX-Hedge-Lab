@@ -323,8 +323,11 @@ def main() -> int:
 
     state = demo_state(today)
     forecast = demo_forecast(today)
+    # 演示站的报价是固定值，但时点必须跟着构建日走：时点为空会被
+    # 报价层判成"过期"，于是每张建议都挂着试算标签，看起来像故障。
+    demo_rates = dict(DEMO_RATES, fetched_at=f"{today.isoformat()}T00:00:00Z", status="demo")
     dashboard = web_app.build_dashboard(
-        state, DEMO_RATES, forecast_doc=forecast, today=today
+        state, demo_rates, forecast_doc=forecast, today=today
     )
     # 冻一份方案进去，这样「方案存档」和参数漂移在演示站上也是活的
     plan = dict(plans.freeze(dashboard, "上月冻结的方案", f"{today.isoformat()}T00:00:00Z"),
@@ -332,7 +335,7 @@ def main() -> int:
     state["plans"] = [plan]
     state["config"] = dict(state["config"], default_hedge_ratio=0.7)  # 制造一次参数漂移
     dashboard = web_app.build_dashboard(
-        state, DEMO_RATES, forecast_doc=forecast, today=today
+        state, demo_rates, forecast_doc=forecast, today=today
     )
     dashboard["audit"] = [
         {"at": f"{today.isoformat()}T02:10:00Z", "action": "update", "collection": "config",

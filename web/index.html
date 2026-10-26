@@ -41,7 +41,7 @@
           <a href="#accounting" data-nav="accounting">对冲会计</a>
           <a href="#audit" data-nav="audit">变更记录</a>
           <a href="#dataManagement" data-nav="dataManagement">数据管理</a>
-          <a href="#rates" data-nav="rates">汇率与缓存</a>
+          <a href="#rates" data-nav="rates">汇率与报价</a>
           <a href="#config" data-nav="config">配置</a>
         </div>
       </nav>
@@ -426,12 +426,52 @@
           <p class="notice" id="backupStatus"></p>
         </section>
 
-        <section id="rates" class="panel compact-panel">
+        <section id="rates" class="panel">
           <div class="panel-title">
-            <h2>汇率与缓存</h2>
+            <h2>汇率与报价</h2>
             <span id="rateStatus"></span>
           </div>
-          <p class="notice">汇率来源：ExchangeRate-API open endpoint；本地按 24 小时缓存。</p>
+          <p class="notice">
+            报价带来源、时点和买卖价：卖出外币用 bid、买入外币用 ask，情景与会计用中间价。
+            价差默认 10bp，可在配置里按币种覆盖；报价超过有效期会标「过期」并进入试算。
+          </p>
+          <h3 class="subhead">即期</h3>
+          <div class="table-wrap">
+            <table id="quoteSpotTable">
+              <thead>
+                <tr>
+                  <th>币种</th>
+                  <th>bid</th>
+                  <th>ask</th>
+                  <th>中间价</th>
+                  <th>价差</th>
+                  <th>来源</th>
+                  <th>时点</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="quoteSpotRows"></tbody>
+            </table>
+          </div>
+          <h3 class="subhead">远期（建议用到的期间）</h3>
+          <div class="table-wrap">
+            <table id="quoteForwardTable">
+              <thead>
+                <tr>
+                  <th>期间</th>
+                  <th>币种</th>
+                  <th>bid</th>
+                  <th>ask</th>
+                  <th>中间价</th>
+                  <th>价差</th>
+                  <th>来源</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="quoteForwardRows"></tbody>
+            </table>
+          </div>
+          <p class="notice" id="quoteNotes"></p>
         </section>
 
         <section id="config" class="panel">
@@ -446,6 +486,8 @@
             <label>VaR 置信度 <input name="var_confidence" type="number" min="0.5" max="0.999" step="0.001" /></label>
             <label>VaR 期限（交易日） <input name="var_horizon_days" type="number" min="1" max="250" step="1" /></label>
             <label>VaR 限额 CNY <input name="var_limit_cny" type="number" min="0" step="10000" /></label>
+            <label>默认买卖价差（bp） <input name="default_spread_bp" type="number" min="0" max="1000" step="1" /></label>
+            <label>报价有效期（小时） <input name="quote_max_age_hours" type="number" min="0" step="1" /></label>
             <label>企业类型
               <select name="enterprise_type">
                 <option value="comprehensive">综合型</option>
@@ -461,6 +503,10 @@
             <label>资金利率 JSON <textarea name="interest_rates" rows="4" data-json-field placeholder='{"CNY":0.019,"USD":0.043}'></textarea></label>
             <label>年化波动率 JSON <textarea name="annual_vol" rows="4" data-json-field placeholder='{"USD":0.05,"EUR":0.07}'></textarea></label>
             <label>相关系数 JSON <textarea name="correlations" rows="4" data-json-field placeholder='{"USD:EUR":0.35,"USD:JPY":0.25}'></textarea></label>
+            <label>分币种价差 JSON（bp） <textarea name="spreads_bp" rows="3" data-json-field placeholder='{"USD":8,"EUR":12}'></textarea></label>
+            <label>基差点数 JSON <textarea name="basis_pips" rows="3" data-json-field placeholder='{"USD":5}'></textarea></label>
+            <label>即期报价覆盖 JSON <textarea name="spot_overrides" rows="4" data-json-field placeholder='{"USD":{"bid":7.17,"ask":7.19}}'></textarea></label>
+            <label>远期报价覆盖 JSON <textarea name="quote_overrides" rows="4" data-json-field placeholder='{"2027-03:USD":{"bid":7.05,"ask":7.08}}'></textarea></label>
             <label>银行远期报价 JSON <textarea name="forward_overrides" rows="4" data-json-field placeholder='{"2027-03:USD":7.08}'></textarea></label>
             <label>分月分币种套保比例 JSON（0–1） <textarea name="month_currency_hedge_ratios" rows="4" data-json-field placeholder='{"2027-03":{"USD":0.75}}'></textarea></label>
             <label>分币种场景 JSON（小数，-0.01 = -1%） <textarea name="scenario_shifts" rows="4" data-json-field placeholder='{"EUR":{"optimistic":-0.01}}'></textarea></label>

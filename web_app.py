@@ -30,6 +30,7 @@ import benchmarks
 import forwards
 import hedge_accounting
 import plans
+import quotes
 import risk
 import variance
 
@@ -94,6 +95,14 @@ DEFAULT_CONFIG = {
     "var_confidence": 0.99,
     "var_horizon_days": 1,
     "var_limit_cny": 0,
+    # 报价层：买卖价差与来源。默认 10bp 双边（每边 5bp），故意不让中间价
+    # 冒充可成交价。有银行双向报价就写进 quote_overrides / spot_overrides。
+    "default_spread_bp": 10,
+    "spreads_bp": {},
+    "basis_pips": {},
+    "spot_overrides": {},
+    "quote_overrides": {},
+    "quote_max_age_hours": 24,
 }
 
 
@@ -395,6 +404,32 @@ def merge_config(base: dict, patch: dict, replace_maps: set[str] | None = None) 
     return merged
 
 
+def _validate_quote_shape(value: object, field: str) -> dict:
+    """报价覆盖项：要么 bid+ask，要么 mid（可带 spread_bp）。"""
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{field} 必须是报价对象")
+    unknown = set(value) - {"bid", "ask", "mid", "spread_bp"}
+    if unknown:
+        raise ValueError(f"{field} 含未知字段: {', '.join(sorted(unknown))}")
+    if "bid" in value or "ask" in value:
+        if "bid" not in value or "ask" not in value:
+            raise ValueError(f"{field} 必须同时给 bid 和 ask")
+        bid = positive_number(value["bid"], f"{field}.bid")
+        ask = positive_number(value["ask"], f"{field}.ask")
+        if ask < bid:
+            raise ValueError(f"{field}.ask 不能低于 bid")
+        return {"bid": bid, "ask": ask}
+    if "mid" not in value:
+        raise ValueError(f"{field} 需要 bid+ask 或 mid")
+    result = {"mid": positive_number(value["mid"], f"{field}.mid")}
+    if "spread_bp" in value:
+        spread = non_negative_number(value["spread_bp"], f"{field}.spread_bp")
+        if spread > 1000:
+            raise ValueError(f"{field}.spread_bp 不能超过 1000")
+        result["spread_bp"] = spread
+    return result
+
+
 def validate_config(payload: dict, base: dict | None = None, replace_maps: set[str] | None = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("配置必须是对象")
@@ -520,6 +555,62 @@ def validate_config(payload: dict, base: dict | None = None, replace_maps: set[s
         raise ValueError("var_horizon_days 不能超过 250 个交易日")
     config["var_horizon_days"] = int(horizon)
     config["var_limit_cny"] = non_negative_number(config.get("var_limit_cny", 0), "var_limit_cny")
+
+    config["default_spread_bp"] = non_negative_number(
+        config.get("default_spread_bp", 10), "default_spread_bp"
+    )
+    if config["default_spread_bp"] > 1000:
+        raise ValueError("default_spread_bp 不能超过 1000")
+    spreads = {}
+    for currency, value in (config.get("spreads_bp") or {}).items():
+        validate_currency_code(currency, "spreads_bp")
+        spread = non_negative_number(value, f"spreads_bp.{currency}")
+        if spread > 1000:
+            raise ValueError(f"spreads_bp.{currency} 不能超过 1000")
+        spreads[currency] = spread
+    config["spreads_bp"] = spreads
+    basis = {}
+    for currency, value in (config.get("basis_pips") or {}).items():
+        validate_currency_code(currency, "basis_pips")
+        pips = finite_number(value, f"basis_pips.{currency}")
+        if not -10000 <= pips <= 10000:
+            raise ValueError(f"basis_pips.{currency} 必须在 -10000 到 10000 之间")
+        basis[currency] = pips
+    config["basis_pips"] = basis
+    spot_overrides = {}
+    raw_spot = config.get("spot_overrides") or {}
+    if not isinstance(raw_spot, dict):
+        raise ValueError("spot_overrides 必须是对象")
+    for currency, value in raw_spot.items():
+        validate_currency_code(currency, "spot_overrides")
+        spot_overrides[currency] = _validate_quote_shape(value, f"spot_overrides.{currency}")
+    config["spot_overrides"] = spot_overrides
+    quote_overrides = {}
+    raw_quotes = config.get("quote_overrides") or {}
+    if not isinstance(raw_quotes, dict):
+        raise ValueError("quote_overrides 必须是对象")
+    for key, value in raw_quotes.items():
+        if not isinstance(key, str):
+            raise ValueError("quote_overrides 的键必须是字符串")
+        if ":" in key:
+            period, currency = key.split(":", 1)
+            validate_period(period, "quote_overrides")
+            validate_currency_code(currency, "quote_overrides")
+            quote_overrides[key] = _validate_quote_shape(value, f"quote_overrides.{key}")
+        else:
+            validate_period(key, "quote_overrides")
+            if not isinstance(value, dict) or not value:
+                raise ValueError(f"quote_overrides.{key} 必须是按币种填写的对象")
+            quote_overrides[key] = {}
+            for currency, quote in value.items():
+                validate_currency_code(currency, "quote_overrides")
+                quote_overrides[key][currency] = _validate_quote_shape(
+                    quote, f"quote_overrides.{key}.{currency}"
+                )
+    config["quote_overrides"] = quote_overrides
+    config["quote_max_age_hours"] = non_negative_number(
+        config.get("quote_max_age_hours", 24), "quote_max_age_hours"
+    )
 
     for key, value in config["confirmed_parameters"].items():
         if not isinstance(key, str) or not isinstance(value, bool):
@@ -1316,6 +1407,11 @@ def build_dashboard(
     scenario_rates = scenario_rates_for(pair_rates, config)
     scenario_summary: dict[str, dict[str, dict]] = {}
     risk_limit = float(config.get("risk_limit_cny", 0) or 0)
+    quote_stale, quote_age, quote_stale_reason = quotes.staleness(
+        rates_cache.get("fetched_at"), config
+    )
+    quote_source_hint = "demo" if rates_cache.get("status") == "demo" else None
+    forward_mids: dict[tuple[str, str], tuple[float, str]] = {}
     for period, currency in keys:
         gross = exposure_totals.get((period, currency), 0.0)
         hedged = hedge_totals.get((period, currency), 0.0)
@@ -1331,7 +1427,20 @@ def build_dashboard(
         # 和实际下的合约不是一张。
         due_date = forwards.period_end_iso(period)
         fwd = forwards.forward_rate(rate, currency, period, config, today=today) if rate_available else None
-        trade_rate = fN(fwd["rate"], 6) if fwd else None
+        # 报价层：远期中间价来自 forwards，买卖价、来源、时点由 quotes 负责。
+        # 建议单据用可成交价（卖出拿 bid、买入拿 ask），情景和会计仍用中间价。
+        action = action_for(config, net)
+        quote = None
+        mid_rate = None
+        trade_rate = None
+        if fwd:
+            quote = quotes.forward_quote(
+                config, currency, period, fwd["rate"], rates_cache.get("fetched_at"),
+                fwd["basis"], quote_source_hint,
+            )
+            mid_rate = fN(quote.mid, 6)
+            trade_rate = fN(quote.executable(action), 6)
+            forward_mids[(period, currency)] = (fwd["rate"], fwd["basis"])
         # 到期日已过的敞口还留在建议里，说明它没被处理掉——不自动删，但要标出来
         past_due = bool(fwd and fwd["tenor_years"] <= 0)
         net_rows.append(
@@ -1363,7 +1472,6 @@ def build_dashboard(
         # 只用方向相反的持仓、且不超过敞口本身——和驾驶舱同一口径
         covered = D(covered_notional(gross, hedged))
         recommended_amount = float(max(D(0), target_cover - covered))
-        action = action_for(config, net)
         bucket = accounting_bucket(category, now_iso()[:10], due_date)
         existing_hedges = hedges_by_key.get((period, currency), [])
 
@@ -1377,7 +1485,8 @@ def build_dashboard(
             {
                 "action": action,
                 "recommended_amount": recommended_amount,
-                "trade_rate": trade_rate,
+                # 估值用中间价：价差是执行成本，单独列，不混进情景损益
+                "trade_rate": mid_rate,
                 "accounting_bucket": bucket,
             },
             rate,
@@ -1405,6 +1514,13 @@ def build_dashboard(
 
         if abs(net) > 0 and recommended_amount > 0:
             trial_reasons = trial_reasons_for(config, currency, period, fwd["basis"])
+            if quote_stale and quote_stale_reason:
+                trial_reasons.append(quote_stale_reason)
+            spread_cost = (
+                abs(recommended_amount) * abs(trade_rate - mid_rate)
+                if trade_rate is not None and mid_rate is not None
+                else 0.0
+            )
             recommendation = {
                 "period": period,
                 "currency": currency,
@@ -1415,8 +1531,18 @@ def build_dashboard(
                 "covered_exposure": f2(covered),
                 "current_rate": rate,
                 "trade_rate": trade_rate,
+                "mid_rate": mid_rate,
+                "bid": fN(quote.bid, 6) if quote else None,
+                "ask": fN(quote.ask, 6) if quote else None,
+                "spread_bp": round(quote.spread_bp, 2) if quote else None,
+                "spread_source": quote.spread_source if quote else None,
+                "quote_source": quote.source if quote else None,
+                "quote_asof": quote.asof if quote else None,
+                "quote_age_hours": round(quote_age, 2) if quote_age is not None else None,
+                "quote_stale": quote_stale,
+                "spread_cost_cny": f2(spread_cost),
                 "spot_rate": rate,
-                "forward_rate": trade_rate,
+                "forward_rate": mid_rate,
                 "forward_points": fN(fwd["points"], 6),
                 "forward_basis": fwd["basis"],
                 "due_date": due_date,
@@ -1469,6 +1595,10 @@ def build_dashboard(
     accounting = hedge_accounting.build(
         accounting_scope, pair_rates, config, asof, settled_rates=settled_rates
     )
+    quote_book = quotes.build_book(
+        config, pair_rates, forward_mids, rates_cache.get("fetched_at"),
+        source_hint=quote_source_hint,
+    )
     return {
         "workspace": {
             "metadata": state.get("metadata", {}),
@@ -1493,6 +1623,7 @@ def build_dashboard(
         "backtest": backtest_rows,
         "risk": risk_view,
         "hedge_accounting": accounting,
+        "quotes": quote_book,
         "audit": read_audit(30),
         "plans": plan_list[-10:][::-1],
         "plan_drift": plan_drift,
@@ -2365,6 +2496,7 @@ class FxRiskHandler(BaseHTTPRequestHandler):
                             "interest_rates", "forward_overrides", "scenario_shifts",
                             "month_currency_hedge_ratios", "monthly_average_rates",
                             "confirmed_parameters", "annual_vol", "correlations",
+                            "spreads_bp", "basis_pips", "spot_overrides", "quote_overrides",
                         )
                         if key in body
                     }
