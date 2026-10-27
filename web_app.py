@@ -106,6 +106,10 @@ DEFAULT_CONFIG = {
     "quote_max_age_hours": 24,
     # 历史模拟：窗口按交易日计，不足 250 个样本时不给结果。
     "historical_window_days": 500,
+    # VaR 回测：用 250 个交易日估计参数，检验最近 250 个交易日的例外次数。
+    # 250 天是 Basel 交通灯那张表的基准，改天数就只报统计量、不给分区。
+    "backtest_window_days": 250,
+    "backtest_days": 250,
     # 套期关系文档的抬头信息（导出 HTML 时用）。
     "entity_name": "",
     "prepared_by": "",
@@ -623,6 +627,16 @@ def validate_config(payload: dict, base: dict | None = None, replace_maps: set[s
     if not 60 <= window <= 2000:
         raise ValueError("historical_window_days 必须在 60 到 2000 之间")
     config["historical_window_days"] = int(window)
+    backtest_window = positive_number(
+        config.get("backtest_window_days", 250), "backtest_window_days"
+    )
+    if not 60 <= backtest_window <= 750:
+        raise ValueError("backtest_window_days 必须在 60 到 750 之间")
+    config["backtest_window_days"] = int(backtest_window)
+    backtest_days = positive_number(config.get("backtest_days", 250), "backtest_days")
+    if not 60 <= backtest_days <= 500:
+        raise ValueError("backtest_days 必须在 60 到 500 之间")
+    config["backtest_days"] = int(backtest_days)
     for key in ("entity_name", "prepared_by"):
         value = config.get(key, "")
         if value is None:

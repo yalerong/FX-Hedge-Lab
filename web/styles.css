@@ -280,6 +280,125 @@ textarea {
   fill: var(--info);
 }
 
+/* VaR 回测：柱子是实际损益，线是各模型的 VaR，柱子越过线就是一次突破 */
+.bar-loss {
+  fill: var(--danger);
+  opacity: 0.42;
+}
+
+.bar-gain {
+  fill: var(--good);
+  opacity: 0.35;
+}
+
+.line-var {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.line-var-historical {
+  stroke: var(--accent);
+}
+
+.line-var-parametric {
+  stroke: var(--info);
+  stroke-dasharray: 6 3;
+}
+
+.line-var-ewma {
+  stroke: var(--warn);
+  stroke-dasharray: 2 3;
+}
+
+.dot-exception {
+  fill: var(--danger);
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.chart-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+
+.legend-bar {
+  background: var(--danger);
+  opacity: 0.5;
+}
+
+.legend-historical {
+  background: var(--accent);
+}
+
+.legend-parametric {
+  background: var(--info);
+}
+
+.legend-ewma {
+  background: var(--warn);
+}
+
+.legend-exception {
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50% !important;
+  background: var(--danger);
+}
+
+.zone-tag {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.zone-green {
+  background: var(--good-soft);
+  color: var(--good-dark);
+}
+
+.zone-yellow {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.zone-red {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.verdict {
+  font-size: 12px;
+}
+
+.verdict-ok {
+  color: var(--good-dark);
+}
+
+.verdict-warn {
+  color: var(--warn);
+}
+
+.verdict-bad {
+  color: var(--danger);
+}
+
 h3.subhead {
   font-size: 14px;
   margin: 18px 0 8px;

@@ -13,7 +13,7 @@ N 个交易日的联合变动重估整个头寸。两者并列，差异本身就
 
 口径与限制：
 
-- 收益率用对数日收益，年化波动率 = 日收益标准差 × √252（样本标准差）。
+- 收益率用对数日收益，年化波动率 = 估计窗口内日收益的标准差 × √252。
 - 历史模拟按**重叠的 h 日窗口**取损益：样本更充分，但相邻窗口相关，
   有效样本小于名义观测数；页面的 observations 是名义值。
 - 组合损益 = Σ w_i × (e^{R_i,h} − 1)，w 是净敞口折人民币。跨期限直接相加，
@@ -119,11 +119,31 @@ def log_returns(rows: list[tuple[str, float]]) -> list[tuple[str, float]]:
     return out
 
 
+def returns_for(currency: str) -> dict[str, float]:
+    """日期 -> 对数日收益。回测和历史模拟共用同一个口径。"""
+    return dict(log_returns(series_for(currency)))
+
+
 def annual_vol(returns: list[float]) -> float | None:
     if len(returns) < 20:
         return None
     mean = sum(returns) / len(returns)
     variance = sum((value - mean) ** 2 for value in returns) / (len(returns) - 1)
+    return math.sqrt(max(0.0, variance)) * math.sqrt(TRADING_DAYS)
+
+
+def ewma_vol(returns: list[float], decay: float = 0.94) -> float | None:
+    """RiskMetrics 式 EWMA 年化波动率。
+
+    等权样本波动率对 250 天前的冲击和昨天的冲击给同样的权重，波动率从
+    3% 跳到 8% 之后要半年才反应得过来。EWMA 按 λ^(k) 衰减，λ=0.94 的
+    半衰期约 11 个交易日，是银行风险系统里的默认值。
+    """
+    if len(returns) < 20:
+        return None
+    variance = sum(value * value for value in returns[:20]) / 20
+    for value in returns[20:]:
+        variance = decay * variance + (1 - decay) * value * value
     return math.sqrt(max(0.0, variance)) * math.sqrt(TRADING_DAYS)
 
 
@@ -156,10 +176,18 @@ def historical_sim(
         if not rows:
             missing.append(currency)
         series[currency] = rows
+    try:
+        window = int(float(config.get("historical_window_days", 500) or 500))
+    except (TypeError, ValueError):
+        window = 500
+    window = max(60, min(window, 2000))
+    # 波动率一律按估计窗口算：全样本年化会把 2019 年的行情和上个月的行情
+    # 平均成一个数，摆在世界模拟 VaR 旁边会误导，两者的样本根本不是一批。
     vols = {}
     for currency, rows in series.items():
-        returns = [value for _, value in log_returns(rows)]
-        vol = annual_vol(returns)
+        if not rows:
+            continue
+        vol = annual_vol([value for _, value in log_returns(rows)][-window:])
         if vol is not None:
             vols[currency] = round(vol, 4)
     if missing:
@@ -174,11 +202,6 @@ def historical_sim(
         currency: dict(log_returns(rows)) for currency, rows in series.items()
     }
     common = sorted(set.intersection(*(set(mapping) for mapping in return_maps.values())))
-    try:
-        window = int(float(config.get("historical_window_days", 500) or 500))
-    except (TypeError, ValueError):
-        window = 500
-    window = max(60, min(window, 2000))
     if len(common) < max(MIN_OBSERVATIONS, horizon + 20):
         return {
             "available": False,
@@ -195,6 +218,13 @@ def historical_sim(
             "missing": [],
             "vols": vols,
         }
+
+    # 多币种时各币种自己的尾巴覆盖的日期不完全一致，按对齐后的窗口再算一遍。
+    vols = {}
+    for currency in currencies:
+        vol = annual_vol([return_maps[currency][day] for day in days])
+        if vol is not None:
+            vols[currency] = round(vol, 4)
 
     aligned = {currency: [return_maps[currency][day] for day in days] for currency in currencies}
     prefix = {}

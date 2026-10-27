@@ -14,12 +14,33 @@
 
 **只要企业能从银行拿到真实报价，就应该用报价覆盖掉这里算出来的数。**
 `forward_overrides` 就是干这个的，覆盖后 basis 标成 `quote`。
+
+计息基准按各币种自己的货币市场惯例：美元、欧元、瑞郎用 ACT/360，
+人民币、英镑、日元、港币、澳元、加元用 ACT/365。用 365 一把尺子量
+所有币种，1 年期美元/人民币远期会偏 5~6bp——对 100 万美元就是 4,000
+块人民币，不是舍入误差。这条惯例是 QuantLib / FinancePy 里 day counter
+的位置，这里只取一年以内用得到的那两个。
 """
 from __future__ import annotations
 
 from datetime import date
 
 DAYS_PER_YEAR = 365.0
+
+# 货币市场 ACT/360 的币种。其余按 ACT/365。
+DAY_COUNT_360 = frozenset({"USD", "EUR", "CHF"})
+DAY_COUNT_LABELS = {"act360": "ACT/360", "act365": "ACT/365"}
+
+
+def day_count_basis(currency: str) -> str:
+    """某币种的货币市场计息基准：act360 或 act365。"""
+    return "act360" if str(currency or "").upper() in DAY_COUNT_360 else "act365"
+
+
+def accrual_years(days: int, currency: str) -> float:
+    """按币种基准把天数折成年。"""
+    base = 360.0 if day_count_basis(currency) == "act360" else DAYS_PER_YEAR
+    return max(int(days), 0) / base
 
 
 def _period_end(period: str) -> date:
@@ -55,7 +76,7 @@ def forward_rate(
     config: dict,
     today: date | None = None,
 ) -> dict:
-    """返回 {rate, points, basis, tenor_years, note}。
+    """返回 {rate, points, basis, tenor_years, day_count, note}。
 
     basis 三种：
       quote  —— 用了 forward_overrides 里的银行报价
@@ -72,9 +93,11 @@ def forward_rate(
             "points": 0.0,
             "basis": "spot",
             "tenor_years": 0.0,
+            "day_count": {},
             "note": "到期日已过或就在今天，远期点为 0",
         }
 
+    days = int(round(t * DAYS_PER_YEAR))
     overrides = config.get("forward_overrides") or {}
     for key, needs_dict in ((f"{period}:{currency}", False), (period, True)):
         value = overrides.get(key)
@@ -95,6 +118,7 @@ def forward_rate(
                     "points": rate - spot,
                     "basis": "quote",
                     "tenor_years": t,
+                    "day_count": {},
                     "note": "银行远期报价（配置里录入）",
                 }
 
@@ -110,14 +134,23 @@ def forward_rate(
             "points": 0.0,
             "basis": "spot",
             "tenor_years": t,
+            "day_count": {},
             "note": f"缺 {'/'.join(missing)} 的利率，暂用即期价",
         }
 
-    rate = spot * (1 + float(i_base) * t) / (1 + float(i_foreign) * t)
+    base_basis = day_count_basis(base_currency)
+    foreign_basis = day_count_basis(currency)
+    t_base = accrual_years(days, base_currency)
+    t_foreign = accrual_years(days, currency)
+    rate = spot * (1 + float(i_base) * t_base) / (1 + float(i_foreign) * t_foreign)
     return {
         "rate": rate,
         "points": rate - spot,
         "basis": "cip",
         "tenor_years": t,
-        "note": f"按利差推算：{base_currency} {float(i_base):.2%} / {currency} {float(i_foreign):.2%}，期限 {t:.2f} 年",
+        "day_count": {"base": DAY_COUNT_LABELS[base_basis], "foreign": DAY_COUNT_LABELS[foreign_basis]},
+        "note": (
+            f"按利差推算：{base_currency} {float(i_base):.2%}（{DAY_COUNT_LABELS[base_basis]}）"
+            f" / {currency} {float(i_foreign):.2%}（{DAY_COUNT_LABELS[foreign_basis]}），{days} 天"
+        ),
     }

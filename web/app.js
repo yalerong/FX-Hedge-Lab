@@ -78,6 +78,8 @@ function formData(form) {
     "default_spread_bp",
     "quote_max_age_hours",
     "historical_window_days",
+    "backtest_window_days",
+    "backtest_days",
     "oci_opening_cny",
     "forecast_max_age_days",
     "settlement_grace_days",
@@ -1195,6 +1197,8 @@ function renderConfig(config) {
   form.hedge_standard.value = config.hedge_standard || "CAS24";
   form.oci_opening_cny.value = config.oci_opening_cny ?? 0;
   form.historical_window_days.value = config.historical_window_days ?? 500;
+  form.backtest_window_days.value = config.backtest_window_days ?? 250;
+  form.backtest_days.value = config.backtest_days ?? 250;
   form.enterprise_type.value = config.enterprise_type || "comprehensive";
   for (const key of CONFIG_PERCENT_FIELDS) {
     form.elements[key].value = config[key] == null ? "" : Number(config[key]) * 100;
@@ -1571,13 +1575,130 @@ function contributionBars(positions) {
 
 // ==================== 风险 ====================
 
+function pValueText(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  const number = Number(value);
+  if (number < 0.001) return "<0.001";
+  return number.toFixed(3);
+}
+
+function zoneTag(zone) {
+  const tags = { green: ["绿", "zone-green"], yellow: ["黄", "zone-yellow"], red: ["红", "zone-red"] };
+  if (!tags[zone]) return '<span class="meta">不适用</span>';
+  const [label, className] = tags[zone];
+  return `<span class="zone-tag ${className}">${label}</span>`;
+}
+
+// 横轴是交易日，纵轴是"亏损"（正数向下画成柱子），VaR 线以上的柱子就是突破。
+function varBacktestChart(data) {
+  const series = data.series || {};
+  const loss = series.loss || [];
+  if (!loss.length) return "";
+  const vars = series.var || {};
+  const width = 760;
+  const height = 200;
+  const top = 10;
+  const bottom = 18;
+  const plot = height - top - bottom;
+  const step = width / loss.length;
+  const values = loss.concat(vars.historical || [], vars.parametric || []);
+  const max = Math.max(1, ...values);
+  const min = Math.min(0, ...loss);
+  const span = (max - min) || 1;
+  const toY = (value) => top + (plot * (max - value)) / span;
+  const zero = toY(0);
+  const parts = [`<line class="chart-axis" x1="0" y1="${zero.toFixed(1)}" x2="${width}" y2="${zero.toFixed(1)}"></line>`];
+  loss.forEach((value, index) => {
+    const y = toY(value);
+    parts.push(
+      `<rect class="${value >= 0 ? "bar-loss" : "bar-gain"}" x="${(index * step).toFixed(1)}" `
+      + `y="${Math.min(y, zero).toFixed(1)}" width="${Math.max(0.9, step - 0.8).toFixed(1)}" `
+      + `height="${Math.max(0.6, Math.abs(y - zero)).toFixed(1)}"></rect>`,
+    );
+  });
+  const lines = [
+    ["historical", "line-var-historical"],
+    ["parametric", "line-var-parametric"],
+    ["ewma", "line-var-ewma"],
+  ];
+  lines.forEach(([key, className]) => {
+    const values_ = vars[key] || [];
+    let path = "";
+    let drawing = false;
+    values_.forEach((value, index) => {
+      if (value == null) {
+        drawing = false;
+        return;
+      }
+      const x = index * step + step / 2;
+      path += `${drawing ? "L" : "M"}${x.toFixed(1)},${toY(value).toFixed(1)}`;
+      drawing = true;
+    });
+    if (path) parts.push(`<path class="line-var ${className}" d="${path}"></path>`);
+  });
+  ((series.exceptions || {}).historical || []).forEach((index) => {
+    if (loss[index] == null) return;
+    parts.push(
+      `<circle class="dot-exception" cx="${(index * step + step / 2).toFixed(1)}" `
+      + `cy="${toY(loss[index]).toFixed(1)}" r="2.4"></circle>`,
+    );
+  });
+  const legend = [
+    '<span><i class="legend-bar"></i>当日损益（正 = 亏损）</span>',
+    '<span><i class="legend-historical"></i>历史模拟 VaR</span>',
+    '<span><i class="legend-parametric"></i>参数法 VaR</span>',
+    (vars.ewma || []).some((value) => value != null) ? '<span><i class="legend-ewma"></i>EWMA VaR</span>' : "",
+    '<span><i class="legend-exception"></i>突破（历史模拟）</span>',
+  ].join("");
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="VaR 回测：每日损益与 VaR 线">`
+    + `${parts.join("")}</svg><div class="chart-legend">${legend}</div>`;
+}
+
+function renderVarBacktest(data) {
+  const summary = document.getElementById("varBacktestSummary");
+  const chartBox = document.getElementById("varBacktestChart");
+  const rows = document.getElementById("varBacktestRows");
+  const notes = document.getElementById("varBacktestNotes");
+  if (!summary || !chartBox || !rows || !notes) return;
+  if (!data.available) {
+    summary.textContent = "不可用";
+    chartBox.innerHTML = `<p class="meta">${escapeHtml(data.reason || "缺本地日线历史")}</p>`;
+    rows.innerHTML = '<tr><td colspan="7" class="empty-row">没有可回测的币种。</td></tr>';
+    notes.innerHTML = "";
+    return;
+  }
+  const missing = (data.missing || []).join("、");
+  summary.textContent = [
+    `${data.start} ~ ${data.end}`,
+    `${data.test_days} 个交易日 · 估计窗口 ${data.window_days} 天`,
+    `期望突破 ${Number(data.expected).toFixed(1)} 次`,
+    data.partial
+      ? `只覆盖 ${(Number(data.coverage) * 100).toFixed(0)}% 净敞口（缺 ${missing}）`
+      : "覆盖全部净敞口",
+  ].join(" · ");
+  chartBox.innerHTML = varBacktestChart(data);
+  rows.innerHTML = (data.models || []).map((model) => `
+    <tr>
+      <td>${escapeHtml(model.label)}</td>
+      <td class="num">${model.exceptions}</td>
+      <td class="num">${(Number(model.rate) * 100).toFixed(1)}%</td>
+      <td class="num">${pValueText(model.kupiec_p)}</td>
+      <td class="num">${pValueText(model.independence_p)}</td>
+      <td>${zoneTag(model.zone)}</td>
+      <td><span class="verdict verdict-${escapeHtml(model.level)}">${escapeHtml(model.verdict)}</span></td>
+    </tr>
+  `).join("");
+  notes.innerHTML = (data.notes || []).map((note) => `<li>${escapeHtml(note)}</li>`).join("");
+}
+
 function renderRisk(risk) {
   const cards = document.getElementById("riskCards");
   const scope = document.getElementById("riskScope");
   if (!cards) return;
   if (!risk || !risk.positions || !risk.positions.length) {
     cards.innerHTML = '<div class="kpi"><span class="kpi-label">暂无风险数据</span><strong class="kpi-value">—</strong><span class="kpi-note">先添加带汇率的敞口</span></div>';
-    ["ladderChart", "ladderRows", "varChart", "varRows", "corrMatrix", "riskNotes"].forEach((id) => {
+    ["ladderChart", "ladderRows", "varChart", "varRows", "corrMatrix", "riskNotes",
+      "varBacktestChart", "varBacktestRows", "varBacktestNotes", "varBacktestSummary"].forEach((id) => {
       const element = document.getElementById(id);
       if (element) element.innerHTML = "";
     });
@@ -1637,12 +1758,14 @@ function renderRisk(risk) {
       <td class="num">${money(row.net_cny)}</td>
       <td class="num">${(Number(row.vol) * 100).toFixed(1)}%</td>
       <td class="num">${row.historical_vol == null ? "—" : (Number(row.historical_vol) * 100).toFixed(1) + "%"}</td>
-      <td class="num">${money(row.contribution_cny)}</td>
+      <td class="num">${row.ewma_vol == null ? "—" : (Number(row.ewma_vol) * 100).toFixed(1) + "%"}</td>
+      <td class="num">${money(row.var_cny)}</td>
       <td class="num">${(Number(row.contribution_pct) * 100).toFixed(1)}%</td>
     </tr>
   `).join("");
 
   renderCorrelations(risk.correlations || {});
+  renderVarBacktest(risk.backtest || {});
   const notes = document.getElementById("riskNotes");
   notes.innerHTML = (risk.notes || []).map((note) => `<li>${escapeHtml(note)}</li>`).join("");
 }

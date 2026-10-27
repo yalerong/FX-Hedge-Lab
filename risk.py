@@ -27,6 +27,7 @@ import math
 from datetime import date
 from statistics import NormalDist
 
+import backtest as var_backtest
 import history
 
 TRADING_DAYS = 252
@@ -256,6 +257,7 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
 
     sigma_net, contributions, vol_notes = _sigma(net_weights, config, matrix, currencies) if currencies else (0.0, {}, [])
     historical = history.historical_sim(net_weights, config, confidence, horizon)
+    backtest_result = var_backtest.run(net_weights, config, confidence, horizon, today)
     sigma_gross = 0.0
     if gross_currencies:
         sigma_gross, _, _ = _sigma(gross_weights, config, matrix, gross_currencies)
@@ -271,12 +273,17 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
     positions = []
     for currency in currencies:
         contribution = contributions.get(currency, 0.0)
+        # 成分 VaR：Euler 分解，各币种加总正好等于组合 VaR。
+        # 只有 σ 的占比看不出"哪一个币种在吃限额"，换成金额才看得懂。
+        component_var = var_net * (contribution / sigma_net) if sigma_net else 0.0
         positions.append(
             {
                 "currency": currency,
                 "net_cny": round(net_weights[currency], 2),
                 "vol": round(vol_for(config, currency)[0], 4),
                 "historical_vol": historical.get("vols", {}).get(currency),
+                "ewma_vol": history.ewma_vol(list(history.returns_for(currency).values())),
+                "var_cny": round(component_var, 2),
                 "contribution_cny": round(contribution, 2),
                 "contribution_pct": (contribution / sigma_net) if sigma_net else 0.0,
             }
@@ -321,6 +328,7 @@ def build(net_rows: list[dict], config: dict, today: date | None = None) -> dict
         "over_limit": bool(limit > 0 and var_net > limit),
         "positions": positions,
         "historical": historical,
+        "backtest": backtest_result,
         "correlations": {
             "currencies": all_currencies,
             "matrix": [[round(value, 4) for value in row] for row in matrix],

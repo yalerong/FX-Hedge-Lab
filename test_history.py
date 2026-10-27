@@ -34,6 +34,17 @@ class SeriesTest(unittest.TestCase):
         self.assertGreater(vol, 0)
         self.assertLess(vol, 1)
 
+    def test_ewma_is_zero_for_a_flat_series(self):
+        self.assertAlmostEqual(history.ewma_vol([0.0] * 100), 0.0, places=12)
+
+    def test_ewma_reacts_faster_than_an_equal_weight_window(self):
+        # 前 100 天平静、后 10 天震荡：等权窗口还在往回看，EWMA 已经跟上了
+        returns = [0.0] * 100 + [0.02] * 10
+        self.assertGreater(history.ewma_vol(returns), history.annual_vol(returns))
+
+    def test_ewma_needs_enough_samples(self):
+        self.assertIsNone(history.ewma_vol([0.001] * 5))
+
 
 class HistoricalSimTest(unittest.TestCase):
     def config(self, **overrides):

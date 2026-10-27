@@ -28,9 +28,24 @@ class ForwardRateTest(unittest.TestCase):
 
     def test_matches_covered_interest_parity_formula(self):
         result = forwards.forward_rate(7.2, "USD", "2026-12", CONFIG, today=TODAY)
-        t = result["tenor_years"]
-        expected = 7.2 * (1 + 0.02 * t) / (1 + 0.05 * t)
+        days = round(result["tenor_years"] * forwards.DAYS_PER_YEAR)
+        # 两条腿各按自己的货币市场基准折年：人民币 ACT/365，美元 ACT/360。
+        expected = (
+            7.2
+            * (1 + 0.02 * forwards.accrual_years(days, "CNY"))
+            / (1 + 0.05 * forwards.accrual_years(days, "USD"))
+        )
         self.assertAlmostEqual(result["rate"], expected, places=10)
+        self.assertEqual(result["day_count"], {"base": "ACT/365", "foreign": "ACT/360"})
+
+    def test_day_count_basis_follows_the_currency(self):
+        # 用 365 一把尺子量所有币种，1 年期美元/人民币远期会偏 5~6bp。
+        self.assertEqual(forwards.day_count_basis("USD"), "act360")
+        self.assertEqual(forwards.day_count_basis("eur"), "act360")
+        self.assertEqual(forwards.day_count_basis("CNY"), "act365")
+        self.assertEqual(forwards.day_count_basis("GBP"), "act365")
+        self.assertAlmostEqual(forwards.accrual_years(360, "USD"), 1.0)
+        self.assertAlmostEqual(forwards.accrual_years(360, "CNY"), 360 / 365)
 
     def test_longer_tenor_means_bigger_points(self):
         near = forwards.forward_rate(7.2, "USD", "2026-03", CONFIG, today=TODAY)
