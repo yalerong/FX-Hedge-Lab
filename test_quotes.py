@@ -110,6 +110,20 @@ class StalenessTest(unittest.TestCase):
 
 
 class BookTest(unittest.TestCase):
+    def test_book_honours_the_injected_clock(self):
+        # 同一个 asof / 同一个 max_age，只换 now，结论必须不同。
+        # 少了这一步，now 参数就是个摆设，测试会随真实时间漂移。
+        config = dict(web_app.DEFAULT_CONFIG, quote_max_age_hours=24)
+        fresh = quotes.build_book(
+            config, {"USD": 7.18}, {}, ASOF, datetime(2026, 10, 26, 9, 0, tzinfo=timezone.utc)
+        )
+        stale = quotes.build_book(
+            config, {"USD": 7.18}, {}, ASOF, datetime(2026, 10, 28, 9, 0, tzinfo=timezone.utc)
+        )
+        self.assertFalse(fresh["stale"])
+        self.assertTrue(stale["stale"])
+        self.assertIn("上限", stale["stale_reason"])
+
     def test_book_contains_spots_and_forwards(self):
         book = quotes.build_book(
             dict(web_app.DEFAULT_CONFIG),

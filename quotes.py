@@ -221,7 +221,9 @@ def build_book(
     source_hint: str | None = None,
 ) -> dict:
     """整本报价：即期 + 已用到的远期，附带过期与价差来源。"""
-    stale, age, reason = staleness(asof, config)
+    # now 必须一路传下去：不传的话 staleness 退回墙钟时间，
+    # 用固定时钟调用的地方（测试、回放、导出）会随真实时间漂移。
+    stale, age, reason = staleness(asof, config, now)
     spots = []
     for currency in sorted(spot_rates):
         try:

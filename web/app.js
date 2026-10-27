@@ -1,4 +1,6 @@
-const fmt = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
+// 金额一律两位小数：3,341,875.5 和 10,637,372.45 混在同一列里，
+// 看上去像精度丢了，不是"省了一个 0"。
+const fmt = new Intl.NumberFormat("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 let dashboard = null;
 let lastDeleted = null;
 const FORM_TITLES = {
@@ -181,6 +183,23 @@ function renderDashboard(data) {
   renderPlans(data.plans || []);
   renderAudit(data.audit || []);
   renderConfig(data.config || {});
+  alignNumericHeaders();
+}
+
+/* 表格里的数字列是右对齐的，表头却默认左对齐，看起来像标签贴错了地方。
+   渲染完扫一遍每张表：哪一列有 td.num，就把对应的 th 也对齐过去。 */
+function alignNumericHeaders() {
+  document.querySelectorAll("table").forEach((table) => {
+    const headers = table.querySelectorAll("thead th");
+    if (!headers.length) return;
+    const numeric = new Set();
+    table.querySelectorAll("tbody tr").forEach((row) => {
+      Array.from(row.children).forEach((cell, index) => {
+        if (cell.classList.contains("num")) numeric.add(index);
+      });
+    });
+    headers.forEach((th, index) => th.classList.toggle("num", numeric.has(index)));
+  });
 }
 
 function renderWorkspace(workspace) {
@@ -219,11 +238,19 @@ function ratioBar(ratio) {
   return `<span class="bar"><span class="bar-fill" style="width:${pct.toFixed(1)}%"></span></span>`;
 }
 
+/* 金额和单位分开排：单位降到 0.62em，窄屏上 "10,637,372.45 CNY" 才不会折行。 */
+function kpiValue(value) {
+  const text = String(value == null ? "" : value);
+  const match = text.match(/^(.+?)\s(CNY|%|笔|天)$/);
+  if (!match) return escapeHtml(text);
+  return `${escapeHtml(match[1])}<span class="kpi-unit">${escapeHtml(match[2])}</span>`;
+}
+
 function kpiCard(label, value, note, tone) {
   return `
     <div class="kpi${tone ? " kpi-" + tone : ""}">
       <span class="kpi-label">${label}</span>
-      <strong class="kpi-value">${value}</strong>
+      <strong class="kpi-value">${kpiValue(value)}</strong>
       <span class="kpi-note">${note || ""}</span>
     </div>
   `;
@@ -1206,6 +1233,10 @@ function renderConfig(config) {
   for (const field of form.querySelectorAll("[data-json-field]")) {
     const fallback = field.dataset.jsonType === "array" ? [] : {};
     field.value = JSON.stringify(config[field.name] || fallback, null, 2);
+    // rows=3/4 装不下格式化后的 JSON，内容被截在框里看着像坏了。
+    // 按内容撑开，上限 320px，超出的自己滚。
+    field.style.height = "auto";
+    field.style.height = `${Math.min(320, Math.max(76, field.scrollHeight + 4))}px`;
   }
   const confirmed = config.confirmed_parameters || {};
   for (const field of form.querySelectorAll("[data-confirmed-key]")) {
@@ -1501,9 +1532,16 @@ function updateSortIndicators() {
 
 // ==================== 图表（纯 SVG，无外部依赖） ====================
 
+/* viewBox 用容器实际宽度：固定 760 在 1400px 的面板里会被放大 1.8 倍，
+   图里 11px 的字渲染出来比正文还大，柱子也跟着变粗。 */
+function chartWidth() {
+  const main = document.querySelector("main") || document.body;
+  return Math.round(Math.max(520, Math.min(1180, main.clientWidth - 46)));
+}
+
 function ladderChart(rows) {
   if (!rows || !rows.length) return '<p class="meta">暂无期限数据。</p>';
-  const width = 760;
+  const width = chartWidth();
   const rowHeight = 34;
   const left = 104;
   const right = 132;
@@ -1528,7 +1566,7 @@ function ladderChart(rows) {
 function scenarioBars(totals) {
   const names = ["neutral", "optimistic", "pessimistic", "custom"].filter((name) => totals[name]);
   if (!names.length) return "";
-  const width = 760;
+  const width = chartWidth();
   const rowHeight = 36;
   const labelWidth = 96;
   const valueWidth = 140;
@@ -1554,7 +1592,7 @@ function scenarioBars(totals) {
 
 function contributionBars(positions) {
   if (!positions || !positions.length) return "";
-  const width = 760;
+  const width = chartWidth();
   const rowHeight = 32;
   const left = 64;
   const right = 150;
@@ -1595,7 +1633,7 @@ function varBacktestChart(data) {
   const loss = series.loss || [];
   if (!loss.length) return "";
   const vars = series.var || {};
-  const width = 760;
+  const width = chartWidth();
   const height = 200;
   const top = 10;
   const bottom = 18;
@@ -1784,14 +1822,15 @@ function renderCorrelations(correlations) {
       if (index === column) return '<td class="corr corr-diag">1.00</td>';
       const isConfigured = !correlations.configured || correlations.configured[index][column];
       const alpha = Math.min(0.55, Math.abs(rho) * 0.55);
-      const color = rho >= 0 ? `rgba(201, 100, 66, ${alpha})` : `rgba(74, 111, 165, ${alpha})`;
+      // 色值和 styles.css 里的 --accent / --info 对齐，深浅主题都靠同一底色压暗
+      const color = rho >= 0 ? `rgba(181, 81, 44, ${alpha})` : `rgba(66, 98, 143, ${alpha})`;
       const mark = isConfigured ? "" : '<sup title="未配置，按 1.00 计入">*</sup>';
       return `<td class="corr${isConfigured ? "" : " corr-default"}" style="background:${color}" title="${escapeHtml(currencies[index])} / ${escapeHtml(currencies[column])}">${rho.toFixed(2)}${mark}</td>`;
     }).join("");
     return `<tr><th>${escapeHtml(currencies[index])}</th>${cells}</tr>`;
   }).join("");
   box.innerHTML = `
-    <div class="table-wrap">
+    <div class="table-wrap corr-wrap">
       <table class="corr-table"><thead>${head}</thead><tbody>${body}</tbody></table>
     </div>
   `;
@@ -1827,7 +1866,11 @@ function renderAccounting(accounting) {
   document.getElementById("accountingRows").innerHTML = rows.length
     ? rows.map((row) => {
       const effectiveness = row.effectiveness == null ? "—" : ratioText(row.effectiveness);
-      const warnings = (row.warnings || []).map(escapeHtml).join("；") || "—";
+      // 警示原文在表格下方的说明里，这里只给个可悬停的计数，免得一列散文把表撑破
+      const warningList = row.warnings || [];
+      const warnings = warningList.length
+        ? `<span class="warn-count" title="${escapeHtml(warningList.join("；"))}">⚠ ${warningList.length}</span>`
+        : '<span class="meta">—</span>';
       return `
         <tr>
           <td>${escapeHtml(row.period)} ${escapeHtml(row.currency)}${row.settled ? ' <span class="warn-tag" title="该期间已录入实际汇率，按结算价重分类">已结算</span>' : ""}</td>

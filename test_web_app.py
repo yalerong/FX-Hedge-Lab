@@ -250,7 +250,7 @@ class WebAppLogicTest(unittest.TestCase):
 
         self.assertTrue(dashboard["suggestions"])
         self.assertTrue(all(row["trial"] for row in dashboard["suggestions"]))
-        self.assertTrue(any("confirm" in reason for row in dashboard["suggestions"]
+        self.assertTrue(any("确认" in reason for row in dashboard["suggestions"]
                             for reason in row["trial_reasons"]))
 
     def test_neutral_scenario_is_not_zero_once_there_are_forward_points(self):

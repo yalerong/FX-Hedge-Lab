@@ -1114,7 +1114,7 @@ def signed_exposure(row: dict) -> float:
         return amount
     if row.get("direction") in {"payment", "liability", "import"}:
         return -amount
-    raise ValueError("direction must be receipt/payment")
+    raise ValueError("方向只能是 receipt（收）/ payment（付）")
 
 
 def signed_hedge(row: dict) -> float:
@@ -1123,7 +1123,7 @@ def signed_hedge(row: dict) -> float:
         return amount
     if row.get("action") == "sell_foreign":
         return -amount
-    raise ValueError("action must be buy_foreign/sell_foreign")
+    raise ValueError("操作只能是 buy_foreign（买入外币）/ sell_foreign（卖出外币）")
 
 
 def period_from_date(value: str) -> str:
@@ -1209,20 +1209,21 @@ def current_rate(pair_rates: dict[str, float], currency: str) -> float | None:
 
 
 def trial_reasons_for(config: dict, currency: str, period: str, forward_basis: str) -> list[str]:
+    """哪些定价输入还没被确认过。这些字符串直接显示在建议卡片上，必须是中文。"""
     reasons: list[str] = []
     confirmed = config.get("confirmed_parameters") or {}
     if not confirmed.get("rates"):
-        reasons.append("confirm current spot rates before execution")
+        reasons.append("成交前确认即期汇率")
     if forward_basis != "quote":
-        reasons.append("confirm bank forward quote before execution")
+        reasons.append("成交前确认银行远期报价")
     if not confirmed.get("interest_rates"):
-        reasons.append("confirm funding rates before relying on CIP pricing")
+        reasons.append("远期价按利差推算，成交前确认资金成本利率")
     ratios = config.get("month_currency_hedge_ratios") or {}
     if not (ratios.get(f"{period}:{currency}") is not None or
             (isinstance(ratios.get(period), dict) and ratios[period].get(currency) is not None)):
-        reasons.append("confirm target hedge ratio for this month and currency")
+        reasons.append("确认本月该币种的目标套保比例")
     if not confirmed.get("scenario_shifts"):
-        reasons.append("confirm scenario assumptions")
+        reasons.append("确认情景假设")
     return reasons
 
 
@@ -2086,7 +2087,7 @@ def validate_for_collection(collection: str, row: dict, config: dict | None = No
         return
     if collection == "plans":
         return
-    raise ValueError("unknown collection")
+    raise ValueError(f"未知的数据集合：{collection}")
 
 
 # 方案是 plans.freeze 冻出来的决策快照，前端会把这些字段直接渲染进表格。
